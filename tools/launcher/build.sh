@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Build the game tile launcher eboot in the Lima VM (run inside it): out/eboot.bin + sce_module/libc.prx
+# Build the game tile launcher in Linux (Lima or WSL): out/app/eboot.bin and libc.prx
 # Same recipe as app/ps5/tools/link-title.sh, without RADV.
 set -euo pipefail
 src=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-vulkan=~/work/PS5_Vulkan
-sdk=~/work/ps5-rpcs3-app/.deps/native/ps5-payload-sdk
-out=${1:-~/work/tile-launcher}
-export PS5_CLANG=${PS5_CLANG:-/usr/bin/clang}
+vulkan=${PS5_VULKAN_DIR:-$HOME/work/PS5_Vulkan}
+app=${APP_DIR:-$HOME/work/ps5-rpcs3-app}
+sdk=${PS5_PAYLOAD_SDK:-$app/.deps/native/ps5-payload-sdk}
+out=${1:-$HOME/work/tile-launcher}
+export PS5_CLANG=${PS5_CLANG:-$(command -v clang || true)}
 tool="$vulkan/build/host/ps5-native-tool"
 native="$vulkan/tooling/native"
 mkdir -p "$out/obj" "$out/app/sce_module"
@@ -17,7 +18,7 @@ cc -std=c11 -O2 -Wall -Werror -c "$src/main.c" -o "$out/obj/main.o"
 # shellcheck source=/dev/null
 source "$vulkan/tools/radv-link.sh"
 radv_link_recipe "$vulkan" "$sdk" "$out/obj/empty.a"
-"$sdk/bin/prospero-lld" --error-limit=0 "${radv_linker_script[@]}" --eh-frame-hdr "${radv_link_flags[@]}" \
+"$sdk/bin/prospero-lld" --error-limit=0 --no-dynamic-linker "${radv_linker_script[@]}" --eh-frame-hdr "${radv_link_flags[@]}" \
     --version-script "$native/app-symbols.map" --exclude-libs=ALL -e _start -o "$out/obj/launcher.elf" \
     "$out/obj/app_crt.o" "$out/obj/main.o" "${radv_link_inputs[@]}" --as-needed "$sdk"/target/lib/*.so
 "$tool" link --in "$out/obj/launcher.elf" --out "$out/obj/eboot.elf" --stub-dir "$sdk/target/lib" \

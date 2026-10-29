@@ -17,6 +17,16 @@
 #include <string.h>
 #include <sys/stat.h>
 
+/*
+ * The pinned PS5 RADV build does not provide these optional wait counters.
+ * Keep weak zero-valued definitions so RPCS3's diagnostic reads have storage,
+ * while any strong definitions in a future RADV archive take precedence.
+ */
+__attribute__((weak)) uint64_t radv_ps5_stat_waits = 0;
+__attribute__((weak)) uint64_t radv_ps5_stat_spin_ns = 0;
+__attribute__((weak)) uint64_t radv_ps5_stat_sleeps = 0;
+__attribute__((weak)) uint64_t radv_ps5_stat_wait_ns = 0;
+
 #ifndef PS5_APP_ROOT
 #define PS5_APP_ROOT "/app0"
 #endif

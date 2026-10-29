@@ -52,6 +52,11 @@ stub libSceAgcDriver vendor/ps5/sdk/stubs/agc_driver_canary_link_stub.c
 # shellcheck source=/dev/null
 source "$vulkan/tools/radv-link.sh"
 radv_link_recipe "$vulkan" "$sdk" "$archive" || exit 2
+# Native TLS needs an explicit PT_TLS template as well as compiler flags.
+# Resolve the unwind script's INCLUDE against the title's native layout.
+if grep -q '^PS5_NATIVE_TLS:BOOL=ON$' "$work/CMakeCache.txt"; then
+    radv_linker_script=(-T "$vulkan/tooling/psbc/ps5-pie-unwind.ld" -L "$ps5/ld")
+fi
 # localeconv in the C locale, '.' the decimal point (the console's gives none, and
 # tinygltf's JSON parser then read 0.62 as 0): the platform layer's since SDK fork
 # fa69d00 (tools/setup-sdk.sh's pin is never older), bound by PS5_Vulkan's recipe
@@ -110,7 +115,11 @@ if [[ -n ${RPCS3_LINK_INPUTS:-} && -f $RPCS3_LINK_INPUTS ]]; then
     mapfile -t rpcs3_archives < "$RPCS3_LINK_INPUTS"
     rpcs3_inputs=(--start-group "${rpcs3_archives[@]}" --end-group)
 fi
-"$sdk/bin/prospero-lld" --error-limit=0 "${radv_linker_script[@]}" --eh-frame-hdr "${radv_link_flags[@]}" \
+# The PS5 native-tool cannot turn ELF undefined weak symbols into SDK imports.
+# Mesa's generated RADV/layer entrypoints are weak by design; on LLD 19 this
+# option resolves absent weak hooks locally instead of exporting them to .dynsym.
+# Strong undefined symbols remain visible and must still be backed by SDK stubs.
+"$sdk/bin/prospero-lld" --error-limit=0 --no-dynamic-linker "${radv_linker_script[@]}" --eh-frame-hdr "${radv_link_flags[@]}" \
     --version-script "$native/app-symbols.map" --exclude-libs=ALL \
     -e _start -o "$work/link/llvm-pie.elf" \
     "$work/link/obj/app_crt.o" "${objects[@]}" "${rpcs3_inputs[@]}" \
@@ -128,6 +137,10 @@ fi
     --stub-dir "$sdk/target/lib" --stub "$work/link/stubs/libSceAgc.so" \
     --stub "$work/link/stubs/libSceAgcDriver.so" --module-sdk 0x02000009 \
     --companion-sdk 0x08050001 --file-name eboot.elf
+
+if grep -q '^PS5_NATIVE_TLS:BOOL=ON$' "$work/CMakeCache.txt"; then
+    python3 "$ps5/tools/check-native-tls.py" "$work/link/llvm-pie.elf" "$work/eboot.elf.new"
+fi
 
 # The title folder
 title_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["titleId"])' "$param")

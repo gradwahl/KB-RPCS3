@@ -65,6 +65,29 @@ def write_tree(dest, repo, rev, path):
     subprocess.run(["tar", "-x", "-C", str(dest), "--strip-components", str(len(Path(path).parts))], input=tar, check=True)
 
 
+def ui_kit_source(revision):
+    """Find the exact pinned UI commit, including setup-kit's bare Git cache.
+
+    The exported .deps/hui directory alone has no Git object database, but
+    setup-kit.sh may already have downloaded the commit as a bare repository.
+    Using that cache lets notice staging run without a sibling checkout and
+    keeps the licence content tied to the pinned revision.
+    """
+    candidates = (ROOT.parent / "PS5_VKHomebrewUI", ROOT / ".deps/PS5_VKHomebrewUI.git")
+    for repo in candidates:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "cat-file", "-e", f"{revision}^{{commit}}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if result.returncode == 0:
+            return repo
+    raise RuntimeError(
+        f"UI kit Git commit {revision} is unavailable. "
+        "Restore ../PS5_VKHomebrewUI or the .deps/PS5_VKHomebrewUI.git "
+        "cache before packaging notices."
+    )
+
+
 LEGAL = """{name} - legal use
 {rule}
 
@@ -117,8 +140,8 @@ def main():
 
     # The UI kit, in a title that has the module
     if (PS5 / "ui/setup-kit.sh").exists():
-        kit = Path(ROOT.parent / "PS5_VKHomebrewUI")
         kit_rev = pinned("ui/setup-kit.sh", "revision")
+        kit = ui_kit_source(kit_rev)
         write_text(out / "ui-kit/LICENSE", kit, kit_rev, "LICENSE")
         parts.append(dict(
             id="ui-kit", name="the UI kit: BlackBearReloaded's ps5-homebrew-ui with my Vulkan backend (PS5_VKHomebrewUI), "
