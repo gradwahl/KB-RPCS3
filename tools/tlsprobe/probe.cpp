@@ -153,7 +153,7 @@ static void* ps5_exit_worker(void*)
 {
 	check_thread(true);
 	g_threads_done.fetch_add(1, std::memory_order_relaxed);
-	ps5_pthread_exit(nullptr);
+	pthread_exit(nullptr);
 }
 
 static std::atomic<int> g_signal_ok{0};
@@ -240,7 +240,7 @@ static void run_destructors()
 	const int after_pexit = g_dtor_total.load();
 	{ pthread_t t; pthread_create(&t, nullptr, ps5_exit_worker, nullptr); pthread_join(t, nullptr); }
 	const int after_ps5 = g_dtor_total.load();
-	logf("destructors: ctors=%d | dtor totals: std::thread=%d, return=%d, pthread_exit=%d, ps5_pthread_exit=%d",
+	logf("destructors: ctors=%d | dtor totals: std::thread=%d, return=%d, pthread_exit=%d, pthread_exit_fallback=%d",
 		g_ctor_total.load(), after_std, after_ret, after_pexit, after_ps5);
 }
 
@@ -257,6 +257,14 @@ static unsigned long long now_ns()
 #ifdef PROBE_EF
 static void run_f_test()
 {
+    uintptr_t main_fs0 = 0, worker_fs0 = 0;
+    __asm__ volatile("movq %%fs:0, %0" : "=r"(main_fs0));
+    std::thread sample([&] {
+        __asm__ volatile("movq %%fs:0, %0" : "=r"(worker_fs0));
+    });
+    sample.join();
+    logf("F key check: fs:0 main=0x%" PRIxPTR " worker=0x%" PRIxPTR,
+         main_fs0, worker_fs0);
 	// F on its own control: initial value, per-thread isolation, and cache lifetime across threads.
 	int* p = (int*)ps5_fast_emutls_get_address(&g_f_ctl);
 	logf("F: main object value=%d (want 7) at %p; cache live entries=%u",
@@ -315,22 +323,7 @@ static void run_n_layout()
 	__asm__ volatile("movq %%fs:0, %0" : "=r"(fs0));
 	logf("N: fs0=0x%" PRIxPTR " &magic=0x%" PRIxPTR " (compiler offset %lld)", fs0, (uintptr_t)&g_magic,
 		(long long)((intptr_t)&g_magic - (intptr_t)fs0));
-	// scan [fs0 - 128 KiB, fs0) for the magic value
-	const uintptr_t lo = fs0 > 0x20000 ? fs0 - 0x20000 : 0;
-	int found = 0;
-	for (uintptr_t p = lo; p + sizeof(uint64_t) <= fs0; p += 8)
-	{
-		uint64_t v;
-		memcpy(&v, (const void*)p, sizeof v);
-		if (v == kMagic)
-		{
-			logf("N: magic found at fs0%+lld (0x%" PRIxPTR ")", (long long)((intptr_t)p - (intptr_t)fs0), p);
-			found++;
-			if (found >= 4) break;
-		}
-	}
-	if (!found)
-		logf("N: magic NOT found in [fs0-128KiB, fs0) (image not copied, or block elsewhere)");
+	logf("N: memory scan disabled for safety");
 	logf("N: value at &magic = 0x%llx", g_magic);
 }
 #endif
@@ -360,9 +353,12 @@ int main(int, char**)
 
 extern "C" void catchReturnFromMain(int status)
 {
+	// Close the title through the PS5 shell, not libc exit().
+	// main() has already closed the log.
 	(void)status;
-	if (g_log) fclose(g_log);
 	sceSystemServiceLoadExec("exit", nullptr);
+
+	// Do not return to app_crt.cpp's exit(status).
 	for (;;)
 		sceKernelUsleep(100000);
 }

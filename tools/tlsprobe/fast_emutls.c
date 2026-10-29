@@ -42,7 +42,9 @@ static void* f_memalign_alloc(size_t align, size_t size)
 	char* object = (char*)malloc((align - 1 + sizeof(void*)) + size);
 	if (!object)
 		abort();
-	return (void*)(((uintptr_t)(object + (align - 1 + sizeof(void*)))) & ~(uintptr_t)(align - 1));
+	uintptr_t aligned = ((uintptr_t)(object + sizeof(void*) + align - 1)) & ~(uintptr_t)(align - 1);
+	((void**)aligned)[-1] = object;
+	return (void*)aligned;
 }
 
 static void f_memalign_free(void* base)
@@ -61,9 +63,8 @@ static _Atomic(void*) f_cache_val[F_CACHE_SLOTS];
 
 static inline uintptr_t f_tcb(void)
 {
-	uintptr_t p;
-	__asm__ volatile("movq %%fs:0, %0" : "=r"(p));
-	return p;
+	/* PS5: %%fs:0 is zero; use pthread identity for this diagnostic. */
+	return (uintptr_t)pthread_self();
 }
 
 static inline size_t f_hash(uintptr_t tcb)

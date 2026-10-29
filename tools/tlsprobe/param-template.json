@@ -9,9 +9,9 @@
   "attribute3": 524352,
   "conceptId": "__CONCEPT_ID__",
   "contentBadgeType": 1,
-  "contentId": "UP9000-__TITLE_ID___00-TLSPROBE0000000",
+  "contentId": "UP9000-__TITLE_ID___00-TLSPROBE00000000",
   "contentVersion": "01.000.000",
-  "downloadDataSize": 16,
+  "downloadDataSize": 256,
   "gameIntent": {
     "permittedIntents": [
       {
