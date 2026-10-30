@@ -1,0 +1,329 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Fri, 30 Oct 2026 03:32:00 +0000
+Subject: [PATCH] PS5: sample RSX FIFO and aggregate draw, DMA and Vulkan timings
+
+Diagnostic-only instrumentation. Sample FIFO running/nonrunning loops
+every 128 iterations, and aggregate CPU time/calls for vertex/index
+preparation, DMA sync and Vulkan queue submit. Report PS5 PERF once
+per watchdog window. No guest/graphics behaviour or game settings
+changed. Timings overlap and do not represent GPU execution time.
+
+---
+diff --git a/rpcs3/Emu/RSX/Core/RSXDrawCommands.cpp b/rpcs3/Emu/RSX/Core/RSXDrawCommands.cpp
+index 194586932..015e9030e 100644
+--- a/rpcs3/Emu/RSX/Core/RSXDrawCommands.cpp
++++ b/rpcs3/Emu/RSX/Core/RSXDrawCommands.cpp
+@@ -1,5 +1,8 @@
+ #include "stdafx.h"
+ #include "RSXDrawCommands.h"
++#ifdef __PROSPERO__
++#include "../ps5_rsx_perf.h"
++#endif
+ 
+ #include "Emu/RSX/Common/BufferUtils.h"
+ #include "Emu/RSX/Common/buffer_stream.hpp"
+@@ -539,6 +542,9 @@ namespace rsx
+ 		void* persistent_data,
+ 		void* volatile_data) const
+ 	{
++#ifdef __PROSPERO__
++		ps5_rsx_perf::timer ps5_vertex_time(ps5_rsx_perf::stage::vertex_upload);
++#endif
+ 		auto transient = static_cast<char*>(volatile_data);
+ 		auto persistent = static_cast<char*>(persistent_data);
+ 
+diff --git a/rpcs3/Emu/RSX/RSXOffload.cpp b/rpcs3/Emu/RSX/RSXOffload.cpp
+index a1ee8c38b..980e17023 100644
+--- a/rpcs3/Emu/RSX/RSXOffload.cpp
++++ b/rpcs3/Emu/RSX/RSXOffload.cpp
+@@ -4,6 +4,9 @@
+ #include "Common/BufferUtils.h"
+ #include "Core/RSXReservationLock.hpp"
+ #include "RSXOffload.h"
++#ifdef __PROSPERO__
++#include "ps5_rsx_perf.h"
++#endif
+ #include "RSXThread.h"
+ 
+ #include "Utilities/lockless.h"
+@@ -185,6 +188,9 @@ namespace rsx
+ 
+ 	bool dma_manager::sync() const
+ 	{
++#ifdef __PROSPERO__
++		ps5_rsx_perf::timer ps5_dma_sync_time(ps5_rsx_perf::stage::dma_sync);
++#endif
+ 		auto& _thr = *m_thread;
+ 
+ #ifdef __PROSPERO__
+diff --git a/rpcs3/Emu/RSX/RSXThread.cpp b/rpcs3/Emu/RSX/RSXThread.cpp
+index b6ac9b643..19b608fc1 100644
+--- a/rpcs3/Emu/RSX/RSXThread.cpp
++++ b/rpcs3/Emu/RSX/RSXThread.cpp
+@@ -1,5 +1,8 @@
+ #include "stdafx.h"
+ #include "RSXThread.h"
++#ifdef __PROSPERO__
++#include "ps5_rsx_perf.h"
++#endif
+ 
+ #include "Capture/rsx_capture.h"
+ #include "Common/surface_store.h"
+@@ -924,8 +927,26 @@ namespace rsx
+ 				}
+ 			}
+ 
+-			// Execute FIFO queue
+-			run_FIFO();
++			// Execute FIFO queue. Sample one in 128 iterations, to avoid
++			// reading a clock for every guest FIFO command. Classify by
++			// resulting state: an approximation, not GPU/CPU overlap.
++#ifdef __PROSPERO__
++			if ((m_cycles_counter & 127) == 0)
++			{
++				const u64 start_ns = ps5_rsx_perf::now_ns();
++				run_FIFO();
++				const u64 end_ns = ps5_rsx_perf::now_ns();
++				ps5_rsx_perf::record(
++					performance_counters.state == FIFO::state::running
++						? ps5_rsx_perf::stage::fifo_running_sample
++						: ps5_rsx_perf::stage::fifo_idle_sample,
++					end_ns >= start_ns ? end_ns - start_ns : 0);
++			}
++			else
++#endif
++			{
++				run_FIFO();
++			}
+ 		}
+ 	}
+ 
+diff --git a/rpcs3/Emu/RSX/VK/VKGSRender.cpp b/rpcs3/Emu/RSX/VK/VKGSRender.cpp
+index 73bb16d13..29da0c5a8 100644
+--- a/rpcs3/Emu/RSX/VK/VKGSRender.cpp
++++ b/rpcs3/Emu/RSX/VK/VKGSRender.cpp
+@@ -8,6 +8,9 @@
+ #include "VKCommonPipelineLayout.h"
+ #include "VKCompute.h"
+ #include "VKGSRender.h"
++#ifdef __PROSPERO__
++#include "../ps5_rsx_perf.h"
++#endif
+ #include "VKHelpers.h"
+ #include "VKRenderPass.h"
+ #include "VKResourceManager.h"
+@@ -917,11 +920,18 @@ std::string VKGSRender::configured_logical_id() const
+ 		return "";
+ 	}
+ 
++#ifdef __PROSPERO__
++	// The console has one GPU. The frontend's adapter alias (and names saved
++	// by older drivers) resolves to that GPU during initialization. Comparing
++	// that alias to the driver's name requests a renderer reset on every flip.
++	return logical_id();
++#else
+ 	// An empty adapter selects the default GPU, which is the one in use
+ 	const std::string adapter = g_cfg.video.vk.adapter.to_string();
+ 	return adapter.empty()
+ 		? logical_id()
+ 		: "Vulkan | " + adapter;
++#endif
+ }
+ 
+ bool VKGSRender::on_access_violation(rsx::context* ctx, u32 address, bool is_writing)
+@@ -2409,6 +2419,9 @@ void VKGSRender::patch_transform_constants(rsx::context* /*ctx*/, u32 index, u32
+ 
+ void VKGSRender::close_and_submit_command_buffer(vk::fence* pFence, VkSemaphore wait_semaphore, VkSemaphore signal_semaphore, VkPipelineStageFlags pipeline_stage_flags)
+ {
++#ifdef __PROSPERO__
++	ps5_rsx_perf::timer ps5_vk_close_time(ps5_rsx_perf::stage::vk_close_submit);
++#endif
+ 	ensure(!m_queue_status.test_and_set(flush_queue_state::flushing));
+ 
+ 	// Host MM sync before executing anything on the GPU
+@@ -2508,7 +2521,12 @@ void VKGSRender::close_and_submit_command_buffer(vk::fence* pFence, VkSemaphore
+ 		primary_submit_info.queue_signal(signal_semaphore);
+ 	}
+ 
+-	m_current_command_buffer->submit(primary_submit_info, force_flush);
++	{
++#ifdef __PROSPERO__
++		ps5_rsx_perf::timer ps5_vk_submit_time(ps5_rsx_perf::stage::vk_queue_submit);
++#endif
++		m_current_command_buffer->submit(primary_submit_info, force_flush);
++	}
+ 
+ 	m_queue_status.clear(flush_queue_state::flushing);
+ }
+diff --git a/rpcs3/Emu/RSX/VK/VKVertexBuffers.cpp b/rpcs3/Emu/RSX/VK/VKVertexBuffers.cpp
+index 72342f9b4..cde39957f 100644
+--- a/rpcs3/Emu/RSX/VK/VKVertexBuffers.cpp
++++ b/rpcs3/Emu/RSX/VK/VKVertexBuffers.cpp
+@@ -1,5 +1,8 @@
+ #include "stdafx.h"
+ #include "VKGSRender.h"
++#ifdef __PROSPERO__
++#include "../ps5_rsx_perf.h"
++#endif
+ #include "../Common/BufferUtils.h"
+ #include "../rsx_methods.h"
+ #include "vkutils/buffer_object.h"
+@@ -157,13 +160,19 @@ namespace
+ 			* Upload index (and expands it if primitive type is not natively supported).
+ 			*/
+ 			u32 min_index, max_index;
+-			std::tie(min_index, max_index, index_count) = write_index_array_data_to_buffer(
+-				dst,
+-				command.raw_index_buffer, index_type,
+-				REGS(m_ctx)->current_draw_clause.primitive,
+-				input_assembly.restart_index_enabled,
+-				input_assembly.restart_index,
+-				[](auto prim) { return !vk::is_primitive_native(prim); });
++			{
++#ifdef __PROSPERO__
++				ps5_rsx_perf::timer ps5_index_time(
++					ps5_rsx_perf::stage::index_convert, command.raw_index_buffer.size_bytes());
++#endif
++				std::tie(min_index, max_index, index_count) = write_index_array_data_to_buffer(
++					dst,
++					command.raw_index_buffer, index_type,
++					REGS(m_ctx)->current_draw_clause.primitive,
++					input_assembly.restart_index_enabled,
++					input_assembly.restart_index,
++					[](auto prim) { return !vk::is_primitive_native(prim); });
++			}
+ 
+ 			if (min_index > max_index ||
+ 				(min_index == max_index && primitive != rsx::primitive_type::points))
+diff --git a/rpcs3/Emu/RSX/ps5_rsx_perf.h b/rpcs3/Emu/RSX/ps5_rsx_perf.h
+new file mode 100644
+index 000000000..edb1895e5
+--- /dev/null
++++ b/rpcs3/Emu/RSX/ps5_rsx_perf.h
+@@ -0,0 +1,82 @@
++// PS5-only RSX diagnostic counters. No emulation decisions depend on these.
++// Each counter is a cumulative CPU-side wall time; categories may nest.
++// FIFO timings are sampled every 128 main-loop iterations and must not be
++// interpreted as an exact per-frame critical-path or GPU execution time.
++#pragma once
++
++#ifdef __PROSPERO__
++#include <atomic>
++#include <cstdint>
++#include <time.h>
++
++namespace ps5_rsx_perf
++{
++    enum class stage : unsigned
++    {
++        fifo_running_sample,
++        fifo_idle_sample,
++        vertex_upload,
++        index_convert,
++        dma_sync,
++        vk_close_submit,
++        vk_queue_submit,
++        count
++    };
++
++    struct counters
++    {
++        std::atomic<std::uint64_t> ns{0};
++        std::atomic<std::uint64_t> calls{0};
++        std::atomic<std::uint64_t> bytes{0};
++    };
++
++    inline counters g_stages[static_cast<unsigned>(stage::count)];
++
++    inline std::uint64_t now_ns() noexcept
++    {
++        struct timespec ts{};
++        ::clock_gettime(CLOCK_MONOTONIC, &ts);
++        return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull +
++               static_cast<std::uint64_t>(ts.tv_nsec);
++    }
++
++    inline void record(stage which, std::uint64_t elapsed, std::uint64_t bytes = 0) noexcept
++    {
++        auto& value = g_stages[static_cast<unsigned>(which)];
++        value.ns.fetch_add(elapsed, std::memory_order_relaxed);
++        value.calls.fetch_add(1, std::memory_order_relaxed);
++        value.bytes.fetch_add(bytes, std::memory_order_relaxed);
++    }
++
++    struct timer
++    {
++        const stage which;
++        const std::uint64_t start;
++        std::uint64_t transferred_bytes;
++        explicit timer(stage value, std::uint64_t bytes = 0) noexcept
++            : which(value), start(now_ns()), transferred_bytes(bytes) {}
++        timer(const timer&) = delete;
++        timer& operator=(const timer&) = delete;
++        ~timer() noexcept
++        {
++            const auto end = now_ns();
++            record(which, end >= start ? end - start : 0, transferred_bytes);
++        }
++    };
++
++    struct sample
++    {
++        std::uint64_t ns;
++        std::uint64_t calls;
++        std::uint64_t bytes;
++    };
++
++    inline sample take(stage which) noexcept
++    {
++        auto& value = g_stages[static_cast<unsigned>(which)];
++        return { value.ns.exchange(0, std::memory_order_relaxed),
++                 value.calls.exchange(0, std::memory_order_relaxed),
++                 value.bytes.exchange(0, std::memory_order_relaxed) };
++    }
++}
++#endif
+diff --git a/rpcs3/ps5/ps5_frontend.cpp b/rpcs3/ps5/ps5_frontend.cpp
+index 42a0af4de..57430c8bb 100644
+--- a/rpcs3/ps5/ps5_frontend.cpp
++++ b/rpcs3/ps5/ps5_frontend.cpp
+@@ -19,6 +19,9 @@
+ #include "Emu/VFS.h"
+ #include "Emu/IdManager.h"
+ #include "Emu/RSX/RSXThread.h"
++#ifdef __PROSPERO__
++#include "Emu/RSX/ps5_rsx_perf.h"
++#endif
+ #include "Emu/RSX/Null/NullGSRender.h"
+ #include "Emu/RSX/VK/VKGSRender.h"
+ #include "Emu/Audio/Null/NullAudioBackend.h"
+@@ -969,6 +972,28 @@ void start_watchdog()
+ 					sys_log.notice("PS5 TIMING: guest/host %.3f, vblank %.1f/s", guest_ratio, vblank_hz);
+ 				}
+ 				sys_log.notice("PS5 CPU: %s", ps5_thread_cpu_report(window_ms * 1'000'000, 14));
++#ifdef __PROSPERO__
++				{
++					using ps5_rsx_perf::stage;
++					const auto active = ps5_rsx_perf::take(stage::fifo_running_sample);
++					const auto idle = ps5_rsx_perf::take(stage::fifo_idle_sample);
++					const auto vertex = ps5_rsx_perf::take(stage::vertex_upload);
++					const auto index = ps5_rsx_perf::take(stage::index_convert);
++					const auto dma = ps5_rsx_perf::take(stage::dma_sync);
++					const auto close = ps5_rsx_perf::take(stage::vk_close_submit);
++					const auto submit = ps5_rsx_perf::take(stage::vk_queue_submit);
++					// Timings are CPU wall time, not GPU runtime; stages nest.
++					// FIFO samples are one in 128 loop iterations; do not
++					// divide by frame count or treat as exact RSX busy %.
++					sys_log.notice("PS5 PERF: window %u ms | FIFO sampled running %u calls %u us idle %u calls %u us | vertex %u calls %u us | index %u calls %u KiB %u us | dma_sync %u calls %u us | vk_close %u calls %u us | vk_submit %u calls %u us",
++						window_ms,
++						active.calls, active.ns / 1000, idle.calls, idle.ns / 1000,
++						vertex.calls, vertex.ns / 1000,
++						index.calls, index.bytes / 1024, index.ns / 1000,
++						dma.calls, dma.ns / 1000, close.calls, close.ns / 1000,
++						submit.calls, submit.ns / 1000);
++				}
++#endif
+ 				ps5_hot_spu_rebalance(rpcs3ps5_tune(7)); // PS5_TUNE_SPU_HOT_CPU
+ 				sys_log.notice("PS5 JIT verify: %llu failures", static_cast<unsigned long long>(rpcs3ps5_jit_verify_failures()));
+ 				sys_log.notice("PS5 NARROW CHECK: %llu mismatches", static_cast<unsigned long long>(rpcs3ps5_narrow_ls_check_failures()));

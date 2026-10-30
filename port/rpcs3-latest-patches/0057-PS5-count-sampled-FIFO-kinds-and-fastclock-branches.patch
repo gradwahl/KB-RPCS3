@@ -1,0 +1,147 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Fri, 30 Oct 2026 03:59:00 +0000
+Subject: [PATCH] PS5: sampled FIFO packet kinds and fast-clock stats reporter
+
+Separately report what sampled FIFO invocations actually read (method,
+NOP, EMPTY, BUSY, self-jump or other flow), with the sampled CPU
+duration for each kind. Log global PS5 clock/yield counters supplied
+by the app fastclock shim. No guest or GPU behavior is changed.
+
+---
+diff --git a/rpcs3/Emu/RSX/RSXFIFO.cpp b/rpcs3/Emu/RSX/RSXFIFO.cpp
+index e8fc0a977..499b428dc 100644
+--- a/rpcs3/Emu/RSX/RSXFIFO.cpp
++++ b/rpcs3/Emu/RSX/RSXFIFO.cpp
+@@ -3,6 +3,9 @@
+ #include "Emu/System.h"
+ #include "RSXFIFO.h"
+ #include "RSXThread.h"
++#ifdef __PROSPERO__
++#include "ps5_rsx_perf.h"
++#endif
+ #include "Capture/rsx_capture.h"
+ #include "Core/RSXReservationLock.hpp"
+ #include "Emu/Memory/vm_reservation.h"
+@@ -735,6 +738,34 @@ namespace rsx
+ 		FIFO::register_pair command;
+ 		fifo_ctrl->read(command);
+ 		const auto cmd = command.reg;
++#ifdef __PROSPERO__
++		// Classify only the first FIFO read of a sampled run_FIFO invocation.
++		// Do NOT change dispatch or count these as whole-function commands:
++		// a single invocation can process many method words in the loop.
++		if ((m_cycles_counter & 127) == 0)
++		{
++			using ps5_rsx_perf::stage;
++			stage kind = stage::fifo_method;
++			if (cmd & (0xffff0000 | RSX_METHOD_NON_METHOD_CMD_MASK))
++			{
++				if (cmd == FIFO::FIFO_NOP) kind = stage::fifo_nop;
++				else if (cmd == FIFO::FIFO_EMPTY) kind = stage::fifo_empty;
++				else if (cmd == FIFO::FIFO_BUSY) kind = stage::fifo_busy;
++				else
++				{
++					kind = stage::fifo_other_flow;
++					const bool old_jump = (cmd & RSX_METHOD_OLD_JUMP_CMD_MASK) == RSX_METHOD_OLD_JUMP_CMD;
++					const bool new_jump = (cmd & RSX_METHOD_NEW_JUMP_CMD_MASK) == RSX_METHOD_NEW_JUMP_CMD;
++					if (old_jump || new_jump)
++					{
++						const u32 offs = cmd & (old_jump ? RSX_METHOD_OLD_JUMP_OFFSET_MASK : RSX_METHOD_NEW_JUMP_OFFSET_MASK);
++						if (offs == fifo_ctrl->get_pos()) kind = stage::fifo_self_jump;
++					}
++				}
++			}
++			ps5_rsx_perf::g_fifo_sample_kind = kind;
++		}
++#endif
+ 
+ 		if (cmd & (0xffff0000 | RSX_METHOD_NON_METHOD_CMD_MASK)) [[unlikely]]
+ 		{
+diff --git a/rpcs3/Emu/RSX/RSXThread.cpp b/rpcs3/Emu/RSX/RSXThread.cpp
+index 19b608fc1..0297321a7 100644
+--- a/rpcs3/Emu/RSX/RSXThread.cpp
++++ b/rpcs3/Emu/RSX/RSXThread.cpp
+@@ -936,11 +936,13 @@ namespace rsx
+ 				const u64 start_ns = ps5_rsx_perf::now_ns();
+ 				run_FIFO();
+ 				const u64 end_ns = ps5_rsx_perf::now_ns();
++				const u64 elapsed_ns = end_ns >= start_ns ? end_ns - start_ns : 0;
+ 				ps5_rsx_perf::record(
+ 					performance_counters.state == FIFO::state::running
+ 						? ps5_rsx_perf::stage::fifo_running_sample
+ 						: ps5_rsx_perf::stage::fifo_idle_sample,
+-					end_ns >= start_ns ? end_ns - start_ns : 0);
++					elapsed_ns);
++				ps5_rsx_perf::record(ps5_rsx_perf::g_fifo_sample_kind, elapsed_ns);
+ 			}
+ 			else
+ #endif
+diff --git a/rpcs3/Emu/RSX/ps5_rsx_perf.h b/rpcs3/Emu/RSX/ps5_rsx_perf.h
+index edb1895e5..0785f0faf 100644
+--- a/rpcs3/Emu/RSX/ps5_rsx_perf.h
++++ b/rpcs3/Emu/RSX/ps5_rsx_perf.h
+@@ -20,6 +20,12 @@ namespace ps5_rsx_perf
+         dma_sync,
+         vk_close_submit,
+         vk_queue_submit,
++        fifo_method,
++        fifo_nop,
++        fifo_empty,
++        fifo_busy,
++        fifo_self_jump,
++        fifo_other_flow,
+         count
+     };
+ 
+@@ -31,6 +37,8 @@ namespace ps5_rsx_perf
+     };
+ 
+     inline counters g_stages[static_cast<unsigned>(stage::count)];
++    // Set by the RSX thread only on the 1/128 sampled FIFO iterations.
++    inline thread_local stage g_fifo_sample_kind = stage::fifo_other_flow;
+ 
+     inline std::uint64_t now_ns() noexcept
+     {
+diff --git a/rpcs3/ps5/ps5_frontend.cpp b/rpcs3/ps5/ps5_frontend.cpp
+index 57430c8bb..557c4ea36 100644
+--- a/rpcs3/ps5/ps5_frontend.cpp
++++ b/rpcs3/ps5/ps5_frontend.cpp
+@@ -89,6 +89,10 @@ static u32 ps5_core_mhz()
+ 	return static_cast<u32>(rounds * 8 * (utils::get_tsc_freq() / 1000) / std::max<u64>(best, 1) / 1000);
+ }
+ 
++extern "C" void rpcs3ps5_fastclock_stats_take(
++    std::uint64_t *clock_calls, std::uint64_t *spin,
++    std::uint64_t *os_yield, std::uint64_t *sleep_calls);
++
+ LOG_CHANNEL(sys_log, "SYS");
+ 
+ std::string ps5_localized_string(localized_string_id id, const char* args); // ps5_localized.cpp
+@@ -992,6 +996,26 @@ void start_watchdog()
+ 						index.calls, index.bytes / 1024, index.ns / 1000,
+ 						dma.calls, dma.ns / 1000, close.calls, close.ns / 1000,
+ 						submit.calls, submit.ns / 1000);
++					const auto method = ps5_rsx_perf::take(stage::fifo_method);
++					const auto nop = ps5_rsx_perf::take(stage::fifo_nop);
++					const auto empty = ps5_rsx_perf::take(stage::fifo_empty);
++					const auto busy = ps5_rsx_perf::take(stage::fifo_busy);
++					const auto jump = ps5_rsx_perf::take(stage::fifo_self_jump);
++					const auto flow = ps5_rsx_perf::take(stage::fifo_other_flow);
++					// All values are 1-in-128 FIRST-READ samples. Durations
++					// are sampled invocation times; no GPU or guest frame sync.
++					sys_log.notice("PS5 FIFO2: window %u ms | method %u calls %u us | nop %u calls %u us | empty %u calls %u us | busy %u calls %u us | self_jump %u calls %u us | other_flow %u calls %u us",
++						window_ms, method.calls, method.ns / 1000,
++						nop.calls, nop.ns / 1000, empty.calls, empty.ns / 1000,
++						busy.calls, busy.ns / 1000, jump.calls, jump.ns / 1000,
++						flow.calls, flow.ns / 1000);
++					std::uint64_t clocks = 0, spins = 0, yields = 0, sleeps = 0;
++					rpcs3ps5_fastclock_stats_take(&clocks, &spins, &yields, &sleeps);
++					sys_log.notice("PS5 CLOCK2: window %u ms | clock_calls %llu | yield_spin %llu | yield_os %llu | yield_sleep %llu",
++						window_ms, static_cast<unsigned long long>(clocks),
++						static_cast<unsigned long long>(spins),
++						static_cast<unsigned long long>(yields),
++						static_cast<unsigned long long>(sleeps));
+ 				}
+ #endif
+ 				ps5_hot_spu_rebalance(rpcs3ps5_tune(7)); // PS5_TUNE_SPU_HOT_CPU

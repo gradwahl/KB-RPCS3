@@ -1,0 +1,22 @@
+From f46c535e5e5ae4b842fe5641196bac9189497981 Mon Sep 17 00:00:00 2001
+From: KB-RPCS3 local build <local-build@localhost>
+Date: Fri, 30 Oct 2026 00:18:47 +0000
+Subject: [PATCH] PS5: exclude Qt keyboard target window from controller input
+
+---
+ rpcs3/Input/pad_thread.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/rpcs3/Input/pad_thread.cpp b/rpcs3/Input/pad_thread.cpp
+index c06dc12e6..70b9f961c 100644
+--- a/rpcs3/Input/pad_thread.cpp
++++ b/rpcs3/Input/pad_thread.cpp
+@@ -977,7 +977,7 @@ void pad_thread::set_target_window(void* window)
+ {
+ 	m_curwindow = window;
+ 
+-#ifndef ANDROID
++#if !defined(ANDROID) && !defined(__PROSPERO__)
+ 	for (const auto& [type, handler] : m_handlers)
+ 	{
+ 		if (type == pad_handler::keyboard)

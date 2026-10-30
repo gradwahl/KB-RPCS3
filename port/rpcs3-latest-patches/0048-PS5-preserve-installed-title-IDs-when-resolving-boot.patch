@@ -1,0 +1,36 @@
+From e5554b7ef76eaebf2ba919061bfe6f4388a510c9 Mon Sep 17 00:00:00 2001
+From: KB-RPCS3 local build <local-build@localhost>
+Date: Thu, 29 Oct 2026 23:10:00 +0000
+Subject: [PATCH 48/49] PS5: preserve installed title IDs when resolving boot
+ paths
+
+Normalize trailing separators like the Qt frontend before System.cpp adds its
+directory separator. The default identity callback produces a double slash
+and slices the first character from installed title IDs, making NPUB30702
+boot from PUB30702 and fail to find common.edat.
+---
+ rpcs3/ps5/ps5_frontend.cpp | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/rpcs3/ps5/ps5_frontend.cpp b/rpcs3/ps5/ps5_frontend.cpp
+index 4b4189c73..932614a75 100644
+--- a/rpcs3/ps5/ps5_frontend.cpp
++++ b/rpcs3/ps5/ps5_frontend.cpp
+@@ -236,6 +236,17 @@ void create_callbacks()
+ {
+ 	emu_callbacks& callbacks = g_emu_callbacks;
+ 
++	// System.cpp appends '/' to resolved directory paths before slicing the
++	// boot path. Qt's canonicalFilePath strips trailing separators; the default
++	// identity callback does not, so it slices NPUB30702 into PUB30702.
++	callbacks.resolve_path = [](std::string_view input)
++	{
++		std::string path{input};
++		while (path.size() > 1 && path.back() == '/')
++			path.pop_back();
++		return path;
++	};
++
+ 	callbacks.call_from_main_thread = [](std::function<void()> func, atomic_t<u32>* wake_up)
+ 	{
+ 		std::lock_guard lock(g_main_mutex);

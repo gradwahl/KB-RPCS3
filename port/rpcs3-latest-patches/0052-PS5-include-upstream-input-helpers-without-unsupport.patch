@@ -1,0 +1,47 @@
+From f568df06faacb30cb1a93a64668f55b00d357332 Mon Sep 17 00:00:00 2001
+From: KB-RPCS3 local build <local-build@localhost>
+Date: Fri, 30 Oct 2026 00:22:19 +0000
+Subject: [PATCH] PS5: include upstream input helpers without unsupported
+ Wiimote bridge
+
+---
+ rpcs3/CMakeLists.txt     | 1 +
+ rpcs3/Emu/Io/GunCon3.cpp | 6 ++++++
+ 2 files changed, 7 insertions(+)
+
+diff --git a/rpcs3/CMakeLists.txt b/rpcs3/CMakeLists.txt
+index e80ee7e6b..aea256181 100644
+--- a/rpcs3/CMakeLists.txt
++++ b/rpcs3/CMakeLists.txt
+@@ -49,6 +49,7 @@ if (PS5)
+         ps5/ps5_stubs.cpp
+         ps5/ps5_text_mirror.cpp
+         ps5/ps5_localized.cpp
++        Input/blob_detector.cpp
+         Input/ps_move_tracker.cpp
+         Input/ps_move_config.cpp
+         Input/pad_thread.cpp
+diff --git a/rpcs3/Emu/Io/GunCon3.cpp b/rpcs3/Emu/Io/GunCon3.cpp
+index 4b6bd6f77..87adc910e 100644
+--- a/rpcs3/Emu/Io/GunCon3.cpp
++++ b/rpcs3/Emu/Io/GunCon3.cpp
+@@ -213,6 +213,11 @@ extern bool is_input_allowed();
+ 
+ bool usb_device_guncon3::handle_wiimote(GunCon3_data& gc)
+ {
++#ifdef __PROSPERO__
++	// The PS5 frontend has no HID Wiimote handler.
++	(void)gc;
++	return false;
++#else
+ 	if (!get_wiimote_config().use_for_guncon.get())
+ 		return false;
+ 
+@@ -284,6 +289,7 @@ bool usb_device_guncon3::handle_wiimote(GunCon3_data& gc)
+ 	}
+ 
+ 	return true;
++#endif
+ }
+ 
+ void usb_device_guncon3::interrupt_transfer(u32 buf_size, u8* buf, u32 endpoint, UsbTransfer* transfer)

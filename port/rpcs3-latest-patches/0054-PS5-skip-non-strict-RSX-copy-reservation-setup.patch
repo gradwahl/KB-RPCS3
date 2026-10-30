@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Fri, 30 Oct 2026 01:42:00 +0000
+Subject: [PATCH] PS5: skip reservation setup for non-strict RSX copy paths
+
+In the default non-strict rendering mode, reservation_lock(addr, size, false)
+cannot acquire a reservation. The synchronous vertex-copy and raw-copy
+offload paths still translate the source pointer to a guest address and
+construct that no-op guard for each transfer.
+
+On PS5, bypass both operations when strict rendering is disabled and copy
+the bytes directly. Preserve the original path in strict mode and leave
+desktop behaviour unchanged. No feature toggle or game timing is changed.
+This is a candidate micro-optimisation; validate FPS before claiming a gain.
+
+---
+diff --git a/rpcs3/Emu/RSX/RSXOffload.cpp b/rpcs3/Emu/RSX/RSXOffload.cpp
+index 4ccfda91a..a1ee8c38b 100644
+--- a/rpcs3/Emu/RSX/RSXOffload.cpp
++++ b/rpcs3/Emu/RSX/RSXOffload.cpp
+@@ -53,6 +53,15 @@ namespace rsx
+ 					{
+ 					case raw_copy:
+ 					{
++#ifdef __PROSPERO__
++						// In the common non-strict mode the reservation guard cannot lock.
++						// Skip the guest-address translation and guard entirely.
++						if (!g_cfg.video.strict_rendering_mode)
++						{
++							std::memcpy(job.dst, job.src, job.length);
++							break;
++						}
++#endif
+ 						const u32 vm_addr = vm::try_get_addr(job.src).first;
+ 						rsx::reservation_lock<true, 1> rsx_lock(vm_addr, job.length, g_cfg.video.strict_rendering_mode && vm_addr);
+ 						std::memcpy(job.dst, job.src, job.length);
+@@ -119,6 +128,15 @@ namespace rsx
+ 	{
+ 		if (length <= max_immediate_transfer_size || !g_cfg.video.multithreaded_rsx)
+ 		{
++#ifdef __PROSPERO__
++			// Strict rendering is disabled for GTA IV. Avoid an unnecessary
++			// vm::try_get_addr and reservation guard for every vertex transfer.
++			if (!g_cfg.video.strict_rendering_mode)
++			{
++				std::memcpy(dst, src, length);
++				return;
++			}
++#endif
+ 			const u32 vm_addr = vm::try_get_addr(src).first;
+ 			rsx::reservation_lock<true, 1> rsx_lock(vm_addr, length, g_cfg.video.strict_rendering_mode && vm_addr);
+ 			std::memcpy(dst, src, length);

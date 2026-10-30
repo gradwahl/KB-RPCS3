@@ -8,10 +8,12 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -euo pipefail
 
-UPSTREAM_URL=https://github.com/RPCS3/rpcs3.git
-UPSTREAM_REV=46aee28f8   # the RPCS3 revision the series was developed and verified against
+UPSTREAM_URL=${RPCS3_UPSTREAM_URL:-https://github.com/RPCS3/rpcs3.git}
+UPSTREAM_REV=${RPCS3_UPSTREAM_REV:-46aee28f8} # established source base by default
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+patch_dir=${RPCS3_PATCH_DIR:-$here/rpcs3-patches}
+branch=${RPCS3_PORT_BRANCH:-kb-rpcs3-0.1.0}
 target=${1:?usage: apply-rpcs3-patches.sh <target-directory>}
 
 if [[ -e $target ]]; then
@@ -22,7 +24,7 @@ fi
 git clone "$UPSTREAM_URL" "$target"
 cd "$target"
 git checkout -q "$UPSTREAM_REV"
-git checkout -q -b kb-rpcs3-0.1.0
+git checkout -q -b "$branch"
 git submodule update --init --recursive
-git -c user.name="kb-rpcs3 patch apply" -c user.email="apply@localhost" am --keep-cr "$here"/rpcs3-patches/*.patch
+git -c user.name="kb-rpcs3 patch apply" -c user.email="apply@localhost" am --keep-cr "$patch_dir"/*.patch
 echo "Applied $(git rev-list --count "$UPSTREAM_REV"..HEAD) patches on top of RPCS3 $UPSTREAM_REV in $target"

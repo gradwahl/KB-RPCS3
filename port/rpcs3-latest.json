@@ -1,0 +1,11 @@
+{
+  "upstream_url": "https://github.com/RPCS3/rpcs3.git",
+  "upstream_revision": "8e26652c85bb5658965fa5731d9a0309ca10b42b",
+  "snapshot_date": "2026-10-29",
+  "previous_upstream_revision": "46aee28f85b9cecc8fd0e5dee0c771f9c88cd27a",
+  "upstream_commits_added": 302,
+  "patch_count": 60,
+  "patch_directory": "rpcs3-latest-patches",
+  "native_tls": true,
+  "experimental_rsx_dma_wait_default_us": 0
+}

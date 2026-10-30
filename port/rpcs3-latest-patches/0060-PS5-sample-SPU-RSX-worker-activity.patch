@@ -1,0 +1,342 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Fri, 30 Oct 2026 05:25:00 +0000
+Subject: [PATCH] PS5: isolate sparse SPU JIT and RSX FIFO worker sampling
+
+Only one in 256 SPU gateway calls, one in 1024 SPU cpu_work calls,
+and one in 512 RSX run_FIFO calls are timed with the native TSC.
+Disable 0059 frame-event probes while isolating worker costs. The
+watchdog reports aggregated CPU wall times; no guest scheduling,
+SPU JIT semantics, RSX dispatch or guest sync logic is altered.
+This is not a GPU timer or a per-frame critical path measurement.
+
+---
+diff --git a/rpcs3/Emu/Cell/SPUThread.cpp b/rpcs3/Emu/Cell/SPUThread.cpp
+index 468333976..dc40a9ffd 100644
+--- a/rpcs3/Emu/Cell/SPUThread.cpp
++++ b/rpcs3/Emu/Cell/SPUThread.cpp
+@@ -1,4 +1,7 @@
+ #include "stdafx.h"
++#ifdef __PROSPERO__
++#include "Emu/RSX/ps5_worker_activity.h"
++#endif
+ #include "Utilities/JIT.h"
+ #include "Utilities/date_time.h"
+ #include "Emu/Memory/vm.h"
+@@ -1550,6 +1553,11 @@ void spu_thread::cpu_task()
+ 		}
+ 	}
+ 
++#ifdef __PROSPERO__
++	// Existing guest SPU thread ID (not an OS thread ID).
++	const auto ps5_spu_slot = ps5_worker_activity::register_spu(lv2_id);
++	std::uint32_t ps5_spu_gateway_sample = 0;
++#endif
+ 	if (jit)
+ 	{
+ 		while (true)
+@@ -1567,7 +1575,21 @@ void spu_thread::cpu_task()
+ 				continue;
+ 			}
+ 
+-			spu_runtime::g_gateway(*this, _ptr<u8>(0), nullptr);
++#ifdef __PROSPERO__
++			// One sampled gateway call per 256. Includes any JIT helper
++			// waits; this is not guest instruction execution-only timing.
++			if (ps5_spu_slot && (++ps5_spu_gateway_sample & 255u) == 0u)
++			{
++				const auto sample_start = utils::get_tsc();
++				spu_runtime::g_gateway(*this, _ptr<u8>(0), nullptr);
++				ps5_worker_activity::record(ps5_spu_slot,
++					ps5_worker_activity::stage::spu_gateway, sample_start);
++			}
++			else
++#endif
++			{
++				spu_runtime::g_gateway(*this, _ptr<u8>(0), nullptr);
++			}
+ 		}
+ 
+ 		if (unsavable && is_stopped(state - cpu_flag::stop))
+@@ -1615,6 +1637,10 @@ void spu_thread::cpu_work()
+ 	}
+ 
+ 	const u32 old_iter_count = cpu_work_iteration_count++;
++#ifdef __PROSPERO__
++	const bool ps5_sample_mfc = ((old_iter_count & 1023u) == 0u);
++	const auto ps5_cpu_work_start = ps5_sample_mfc ? utils::get_tsc() : 0;
++#endif
+ 
+ 	bool work_left = false;
+ 
+@@ -1697,6 +1723,17 @@ void spu_thread::cpu_work()
+ 		});
+ 	}
+ 
++#ifdef __PROSPERO__
++	if (ps5_sample_mfc)
++	{
++		// cached per-host-thread pointer; no scan on hot path.
++		static thread_local ps5_worker_activity::worker_slot* slot = nullptr;
++		if (!slot || slot->id.load(std::memory_order_relaxed) != lv2_id)
++			slot = ps5_worker_activity::register_spu(lv2_id);
++		ps5_worker_activity::record(slot,
++			ps5_worker_activity::stage::spu_cpu_work, ps5_cpu_work_start);
++	}
++#endif
+ 	if (gen_interrupt)
+ 	{
+ 		// Interrupt! escape everything and restart execution
+diff --git a/rpcs3/Emu/RSX/RSXThread.cpp b/rpcs3/Emu/RSX/RSXThread.cpp
+index 54b4095cd..eedbd04de 100644
+--- a/rpcs3/Emu/RSX/RSXThread.cpp
++++ b/rpcs3/Emu/RSX/RSXThread.cpp
+@@ -1,4 +1,7 @@
+ #include "stdafx.h"
++#ifdef __PROSPERO__
++#include "Emu/RSX/ps5_worker_activity.h"
++#endif
+ #include "RSXThread.h"
+ #ifdef __PROSPERO__
+ #include "ps5_rsx_perf.h"
+@@ -881,6 +884,9 @@ namespace rsx
+ 			manager->stop_audio();
+ 		}
+ 
++#ifdef __PROSPERO__
++		std::uint32_t ps5_rsx_fifo_sampler = 0;
++#endif
+ 		while (!test_stopped())
+ 		{
+ 			// Wait for external pause events
+@@ -947,7 +953,31 @@ namespace rsx
+ 			else
+ #endif
+ 			{
+-				run_FIFO();
++#ifdef __PROSPERO__
++				// Sample 1/512 run_FIFO calls; all other calls keep the
++				// unmodified fast path. State is measured AFTER the call.
++				// Running may process multiple guest method words.
++				if ((++ps5_rsx_fifo_sampler & 511u) == 0u)
++				{
++					const auto sample_start = utils::get_tsc();
++					run_FIFO();
++					using perf_stage = ps5_worker_activity::stage;
++					perf_stage kind = perf_stage::rsx_fifo_other;
++					switch (performance_counters.state)
++					{
++					case FIFO::state::running: kind = perf_stage::rsx_fifo_running; break;
++					case FIFO::state::nop: kind = perf_stage::rsx_fifo_nop; break;
++					case FIFO::state::empty: kind = perf_stage::rsx_fifo_empty; break;
++					case FIFO::state::spinning: kind = perf_stage::rsx_fifo_spinning; break;
++					default: break;
++					}
++					ps5_worker_activity::record_rsx(kind, sample_start);
++				}
++				else
++#endif
++				{
++					run_FIFO();
++				}
+ 			}
+ 		}
+ 	}
+diff --git a/rpcs3/Emu/RSX/ps5_frame_trace.h b/rpcs3/Emu/RSX/ps5_frame_trace.h
+index a74b5af2a..23a5084a8 100644
+--- a/rpcs3/Emu/RSX/ps5_frame_trace.h
++++ b/rpcs3/Emu/RSX/ps5_frame_trace.h
+@@ -10,6 +10,10 @@
+ 
+ namespace ps5_frame_trace
+ {
++    // After patch 0059 established that guest-wait and Vulkan-call times
++    // are not the dominant synchronous frame costs, disable this earlier
++    // tracer while isolating SPU / RSX worker sampling in patch 0060.
++    inline constexpr bool enabled = false;
+     enum class event : unsigned
+     {
+         guest_queue_begin = 1,
+@@ -59,6 +63,7 @@ namespace ps5_frame_trace
+ 
+     inline void mark(event kind, std::uint32_t arg = 0) noexcept
+     {
++        if constexpr (!enabled) return;
+         if (!sampled.load(std::memory_order_relaxed)) return;
+         const auto frame = epoch.load(std::memory_order_relaxed);
+         stamp(kind, arg, frame, utils::get_tsc());
+@@ -69,6 +74,7 @@ namespace ps5_frame_trace
+     // asynchronous GPU submissions belong to that particular guest frame.
+     inline void guest_queue(std::uint32_t buffer) noexcept
+     {
++        if constexpr (!enabled) return;
+         const auto next = epoch.fetch_add(1, std::memory_order_relaxed) + 1;
+         const bool enabled = (next % 32u == 0u);
+         sampled.store(enabled, std::memory_order_relaxed);
+@@ -85,7 +91,7 @@ namespace ps5_frame_trace
+         const std::uint64_t started;
+         explicit long_wait(event k, std::uint32_t identifier) noexcept
+             : kind(k), arg(identifier),
+-              frame(sampled.load(std::memory_order_relaxed)
++              frame(enabled && sampled.load(std::memory_order_relaxed)
+                         ? epoch.load(std::memory_order_relaxed) : 0),
+               started(frame ? utils::get_tsc() : 0) {}
+         ~long_wait() noexcept
+diff --git a/rpcs3/Emu/RSX/ps5_worker_activity.h b/rpcs3/Emu/RSX/ps5_worker_activity.h
+new file mode 100644
+index 000000000..5dc967b58
+--- /dev/null
++++ b/rpcs3/Emu/RSX/ps5_worker_activity.h
+@@ -0,0 +1,96 @@
++// PS5: low-rate SPU JIT and RSX FIFO CPU activity sampler.
++// No guest emulation changes and no logging/locks/allocations in hot paths.
++// Samples are *inclusive CPU wall-time*, never GPU execution or per-frame time.
++#pragma once
++#ifdef __PROSPERO__
++#include <atomic>
++#include <cstdint>
++#include "util/tsc.hpp"
++
++namespace ps5_worker_activity
++{
++    enum class stage : unsigned
++    {
++        spu_gateway = 0,
++        spu_cpu_work = 1,
++        rsx_fifo_running = 2,
++        rsx_fifo_nop = 3,
++        rsx_fifo_empty = 4,
++        rsx_fifo_spinning = 5,
++        rsx_fifo_other = 6,
++        count = 7
++    };
++    constexpr unsigned stage_count = static_cast<unsigned>(stage::count);
++
++    struct counters
++    {
++        std::atomic<std::uint64_t> sampled{0};
++        std::atomic<std::uint64_t> total_tsc{0};
++        std::atomic<std::uint64_t> max_tsc{0};
++
++        void record(std::uint64_t elapsed) noexcept
++        {
++            sampled.fetch_add(1, std::memory_order_relaxed);
++            total_tsc.fetch_add(elapsed, std::memory_order_relaxed);
++            auto old_max = max_tsc.load(std::memory_order_relaxed);
++            while (elapsed > old_max &&
++                   !max_tsc.compare_exchange_weak(old_max, elapsed,
++                       std::memory_order_relaxed, std::memory_order_relaxed)) {}
++        }
++    };
++    struct worker_slot
++    {
++        std::atomic<std::uint32_t> id{0};
++        counters stats[2];
++    };
++    inline worker_slot spu[64]{};
++    inline counters rsx[stage_count]{};
++    inline std::atomic<std::uint64_t> slot_overflow{0};
++
++    // Resolve once when the SPU task begins; never perform this scan
++    // in the JIT gateway or MFC hot path. lv2 IDs uniquely identify guests.
++    inline worker_slot* register_spu(std::uint32_t id) noexcept
++    {
++        if (!id) return nullptr;
++        for (auto& slot : spu)
++        {
++            auto found = slot.id.load(std::memory_order_relaxed);
++            if (found == id) return &slot;
++            if (!found && slot.id.compare_exchange_strong(found, id,
++                std::memory_order_release, std::memory_order_relaxed))
++                return &slot;
++        }
++        slot_overflow.fetch_add(1, std::memory_order_relaxed);
++        return nullptr;
++    }
++
++    // Caller selects 1/N operations. Counter data is approximate: gateway
++    // can include guest spin/channel helper work and can span frame boundaries.
++    inline void record(worker_slot* slot, stage kind,
++        std::uint64_t start) noexcept
++    {
++        if (!slot) return;
++        auto end = utils::get_tsc();
++        if (end >= start)
++            slot->stats[static_cast<unsigned>(kind)].record(end - start);
++    }
++
++    inline void record_rsx(stage kind, std::uint64_t start) noexcept
++    {
++        auto end = utils::get_tsc();
++        if (end >= start)
++            rsx[static_cast<unsigned>(kind)].record(end - start);
++    }
++
++    struct taken
++    {
++        std::uint64_t sampled, total_tsc, max_tsc;
++    };
++    inline taken take(counters& value) noexcept
++    {
++        return {value.sampled.exchange(0, std::memory_order_acq_rel),
++                value.total_tsc.exchange(0, std::memory_order_acq_rel),
++                value.max_tsc.exchange(0, std::memory_order_acq_rel)};
++    }
++}
++#endif
+diff --git a/rpcs3/ps5/ps5_frontend.cpp b/rpcs3/ps5/ps5_frontend.cpp
+index 03d1ade58..e050659c6 100644
+--- a/rpcs3/ps5/ps5_frontend.cpp
++++ b/rpcs3/ps5/ps5_frontend.cpp
+@@ -22,6 +22,7 @@
+ #ifdef __PROSPERO__
+ #include "Emu/RSX/ps5_rsx_perf.h"
+ #include "Emu/RSX/ps5_frame_trace.h"
++#include "Emu/RSX/ps5_worker_activity.h"
+ #endif
+ #include "Emu/RSX/Null/NullGSRender.h"
+ #include "Emu/RSX/VK/VKGSRender.h"
+@@ -1019,6 +1020,43 @@ void start_watchdog()
+                             static_cast<unsigned long long>(end));
+                 }
+ #endif
++
++#ifdef __PROSPERO__
++                // Low-rate targeted worker measurements; no timing of each
++                // SPU JIT block or each FIFO dispatch. This watchdog alone
++                // drains aggregates. These are overlapping host CPU wall times.
++                {
++                    using ps5_worker_activity::stage;
++                    const double clock_hz = static_cast<double>(utils::get_tsc_freq());
++                    const auto emit = [&](const char* group, u32 thread_id, stage kind,
++                        ps5_worker_activity::counters& counter)
++                    {
++                        const auto sample = ps5_worker_activity::take(counter);
++                        if (!sample.sampled || !clock_hz) return;
++                        const double mean_us = 1'000'000.0 * sample.total_tsc / (clock_hz * sample.sampled);
++                        const double max_us = 1'000'000.0 * sample.max_tsc / clock_hz;
++                        const double sampled_sum_us = 1'000'000.0 * sample.total_tsc / clock_hz;
++                        sys_log.notice("PS5 WORKER: group %s id 0x%x kind %u sample_n %llu avg_us %.3f max_us %.3f sampled_sum_us %.3f",
++                            group, thread_id, static_cast<unsigned>(kind),
++                            static_cast<unsigned long long>(sample.sampled),
++                            mean_us, max_us, sampled_sum_us);
++                    };
++                    for (auto& slot : ps5_worker_activity::spu)
++                    {
++                        if (const u32 id = slot.id.load(std::memory_order_acquire))
++                        {
++                            emit("spu", id, stage::spu_gateway, slot.stats[0]);
++                            emit("spu", id, stage::spu_cpu_work, slot.stats[1]);
++                        }
++                    }
++                    for (unsigned kind = static_cast<unsigned>(stage::rsx_fifo_running);
++                         kind < static_cast<unsigned>(stage::count); ++kind)
++                        emit("rsx", 0, static_cast<stage>(kind), ps5_worker_activity::rsx[kind]);
++                    if (const auto overflow = ps5_worker_activity::slot_overflow.exchange(0))
++                        sys_log.notice("PS5 WORKER2: lost_spu_slot_allocations %llu",
++                            static_cast<unsigned long long>(overflow));
++                }
++#endif
+ #if defined(__PROSPERO__) && PS5_RSX_PERF_ACTIVE
+ 				{
+ 					using ps5_rsx_perf::stage;

@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Fri, 30 Oct 2026 04:17:00 +0000
+Subject: [PATCH] PS5: disable diagnostic timing and sampler for overhead control
+
+Compile out PS5 PERF, FIFO2 and CLOCK2 diagnostic probes/printing;
+disable the watchdog's rotating 400-SIGUSR1-sample profiler.
+Preserve guest execution, scheduling, FIFO dispatch, Vulkan logic,
+and FPS statistics to measure aggregate diagnostic overhead.
+The app fastclock matching change is tracked outside the upstream
+patch series in app/ps5/src/ps5_fastclock.c.
+
+---
+diff --git a/rpcs3/Emu/RSX/Core/RSXDrawCommands.cpp b/rpcs3/Emu/RSX/Core/RSXDrawCommands.cpp
+index 015e9030e..d293855bc 100644
+--- a/rpcs3/Emu/RSX/Core/RSXDrawCommands.cpp
++++ b/rpcs3/Emu/RSX/Core/RSXDrawCommands.cpp
+@@ -542,7 +542,7 @@ namespace rsx
+ 		void* persistent_data,
+ 		void* volatile_data) const
+ 	{
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) && PS5_RSX_PERF_ACTIVE
+ 		ps5_rsx_perf::timer ps5_vertex_time(ps5_rsx_perf::stage::vertex_upload);
+ #endif
+ 		auto transient = static_cast<char*>(volatile_data);
+diff --git a/rpcs3/Emu/RSX/RSXFIFO.cpp b/rpcs3/Emu/RSX/RSXFIFO.cpp
+index 499b428dc..8be864276 100644
+--- a/rpcs3/Emu/RSX/RSXFIFO.cpp
++++ b/rpcs3/Emu/RSX/RSXFIFO.cpp
+@@ -738,7 +738,7 @@ namespace rsx
+ 		FIFO::register_pair command;
+ 		fifo_ctrl->read(command);
+ 		const auto cmd = command.reg;
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) && PS5_RSX_PERF_ACTIVE
+ 		// Classify only the first FIFO read of a sampled run_FIFO invocation.
+ 		// Do NOT change dispatch or count these as whole-function commands:
+ 		// a single invocation can process many method words in the loop.
+diff --git a/rpcs3/Emu/RSX/RSXOffload.cpp b/rpcs3/Emu/RSX/RSXOffload.cpp
+index 980e17023..0d9396bd0 100644
+--- a/rpcs3/Emu/RSX/RSXOffload.cpp
++++ b/rpcs3/Emu/RSX/RSXOffload.cpp
+@@ -188,7 +188,7 @@ namespace rsx
+ 
+ 	bool dma_manager::sync() const
+ 	{
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) && PS5_RSX_PERF_ACTIVE
+ 		ps5_rsx_perf::timer ps5_dma_sync_time(ps5_rsx_perf::stage::dma_sync);
+ #endif
+ 		auto& _thr = *m_thread;
+diff --git a/rpcs3/Emu/RSX/RSXThread.cpp b/rpcs3/Emu/RSX/RSXThread.cpp
+index 0297321a7..54b4095cd 100644
+--- a/rpcs3/Emu/RSX/RSXThread.cpp
++++ b/rpcs3/Emu/RSX/RSXThread.cpp
+@@ -930,7 +930,7 @@ namespace rsx
+ 			// Execute FIFO queue. Sample one in 128 iterations, to avoid
+ 			// reading a clock for every guest FIFO command. Classify by
+ 			// resulting state: an approximation, not GPU/CPU overlap.
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) && PS5_RSX_PERF_ACTIVE
+ 			if ((m_cycles_counter & 127) == 0)
+ 			{
+ 				const u64 start_ns = ps5_rsx_perf::now_ns();
+diff --git a/rpcs3/Emu/RSX/VK/VKGSRender.cpp b/rpcs3/Emu/RSX/VK/VKGSRender.cpp
+index 29da0c5a8..bf6fa3f5d 100644
+--- a/rpcs3/Emu/RSX/VK/VKGSRender.cpp
++++ b/rpcs3/Emu/RSX/VK/VKGSRender.cpp
+@@ -2419,7 +2419,7 @@ void VKGSRender::patch_transform_constants(rsx::context* /*ctx*/, u32 index, u32
+ 
+ void VKGSRender::close_and_submit_command_buffer(vk::fence* pFence, VkSemaphore wait_semaphore, VkSemaphore signal_semaphore, VkPipelineStageFlags pipeline_stage_flags)
+ {
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) && PS5_RSX_PERF_ACTIVE
+ 	ps5_rsx_perf::timer ps5_vk_close_time(ps5_rsx_perf::stage::vk_close_submit);
+ #endif
+ 	ensure(!m_queue_status.test_and_set(flush_queue_state::flushing));
+@@ -2522,7 +2522,7 @@ void VKGSRender::close_and_submit_command_buffer(vk::fence* pFence, VkSemaphore
+ 	}
+ 
+ 	{
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) && PS5_RSX_PERF_ACTIVE
+ 		ps5_rsx_perf::timer ps5_vk_submit_time(ps5_rsx_perf::stage::vk_queue_submit);
+ #endif
+ 		m_current_command_buffer->submit(primary_submit_info, force_flush);
+diff --git a/rpcs3/Emu/RSX/VK/VKVertexBuffers.cpp b/rpcs3/Emu/RSX/VK/VKVertexBuffers.cpp
+index cde39957f..f40a9eefa 100644
+--- a/rpcs3/Emu/RSX/VK/VKVertexBuffers.cpp
++++ b/rpcs3/Emu/RSX/VK/VKVertexBuffers.cpp
+@@ -161,7 +161,7 @@ namespace
+ 			*/
+ 			u32 min_index, max_index;
+ 			{
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) && PS5_RSX_PERF_ACTIVE
+ 				ps5_rsx_perf::timer ps5_index_time(
+ 					ps5_rsx_perf::stage::index_convert, command.raw_index_buffer.size_bytes());
+ #endif
+diff --git a/rpcs3/Emu/RSX/ps5_rsx_perf.h b/rpcs3/Emu/RSX/ps5_rsx_perf.h
+index 0785f0faf..b34798737 100644
+--- a/rpcs3/Emu/RSX/ps5_rsx_perf.h
++++ b/rpcs3/Emu/RSX/ps5_rsx_perf.h
+@@ -4,6 +4,9 @@
+ // interpreted as an exact per-frame critical-path or GPU execution time.
+ #pragma once
+ 
++// Controlled diagnostic-off build. All counters and timer callsites are excluded.
++#define PS5_RSX_PERF_ACTIVE 0
++
+ #ifdef __PROSPERO__
+ #include <atomic>
+ #include <cstdint>
+diff --git a/rpcs3/ps5/ps5_frontend.cpp b/rpcs3/ps5/ps5_frontend.cpp
+index 557c4ea36..aa6021f10 100644
+--- a/rpcs3/ps5/ps5_frontend.cpp
++++ b/rpcs3/ps5/ps5_frontend.cpp
+@@ -976,7 +976,7 @@ void start_watchdog()
+ 					sys_log.notice("PS5 TIMING: guest/host %.3f, vblank %.1f/s", guest_ratio, vblank_hz);
+ 				}
+ 				sys_log.notice("PS5 CPU: %s", ps5_thread_cpu_report(window_ms * 1'000'000, 14));
+-#ifdef __PROSPERO__
++#if defined(__PROSPERO__) && PS5_RSX_PERF_ACTIVE
+ 				{
+ 					using ps5_rsx_perf::stage;
+ 					const auto active = ps5_rsx_perf::take(stage::fifo_running_sample);
+@@ -1063,7 +1063,7 @@ void start_watchdog()
+ 				}
+ 				// Where the busiest threads spend their time: 2 s of samples every ~8 s, cycling through the top 4
+ 				// ("sys@addr" = inside libkernel/system code, called from addr)
+-				if (++cpu_reports % 2 == 0)
++				if (PS5_RSX_PERF_ACTIVE && ++cpu_reports % 2 == 0)
+ 				{
+ 					// Every 5th slot is the RSX thread explicitly (affinity/contention experiment); the rest
+ 					// are the busiest threads.

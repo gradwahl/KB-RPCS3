@@ -1,0 +1,432 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Fri, 30 Oct 2026 05:04:00 +0000
+Subject: [PATCH] PS5: sparsely trace guest queue, host waits and Vulkan frame path
+
+Capture 1-in-32 guest display-queue wall-time epochs in a fixed-size
+atomic event ring, drain on the watchdog only. Record guest PPU event
+queue, event flag and semaphore waits longer than 500 us, RSX present,
+Vulkan queue submit, swapchain acquire/present and host fence waits.
+Retain the profiler-OFF build and existing FPS reports. These are
+CPU-side timestamps; no GPU execution timestamps or true frame DAG.
+A report explicitly counts overwritten/missed events.
+
+---
+diff --git a/rpcs3/Emu/Cell/lv2/sys_event.cpp b/rpcs3/Emu/Cell/lv2/sys_event.cpp
+index 28e88cc52..3523e2082 100644
+--- a/rpcs3/Emu/Cell/lv2/sys_event.cpp
++++ b/rpcs3/Emu/Cell/lv2/sys_event.cpp
+@@ -1,4 +1,7 @@
+ #include "stdafx.h"
++#ifdef __PROSPERO__
++#include "Emu/RSX/ps5_frame_trace.h"
++#endif
+ #include "sys_event.h"
+ 
+ #include "Emu/IdManager.h"
+@@ -526,6 +529,9 @@ error_code sys_event_queue_receive(ppu_thread& ppu, u32 equeue_id, vm::ptr<sys_e
+ 		return CELL_OK;
+ 	}
+ 
++#ifdef __PROSPERO__
++	ps5_frame_trace::long_wait ps5_ppu_wait(ps5_frame_trace::event::ppu_event_wait_begin, ppu.id);
++#endif
+ 	// If cancelled, gpr[3] will be non-zero. Other registers must contain event data.
+ 	while (auto state = +ppu.state)
+ 	{
+diff --git a/rpcs3/Emu/Cell/lv2/sys_event_flag.cpp b/rpcs3/Emu/Cell/lv2/sys_event_flag.cpp
+index 19df83c75..212e1a46b 100644
+--- a/rpcs3/Emu/Cell/lv2/sys_event_flag.cpp
++++ b/rpcs3/Emu/Cell/lv2/sys_event_flag.cpp
+@@ -1,4 +1,7 @@
+ #include "stdafx.h"
++#ifdef __PROSPERO__
++#include "Emu/RSX/ps5_frame_trace.h"
++#endif
+ #include "sys_event_flag.h"
+ 
+ #include "Emu/IdManager.h"
+@@ -195,6 +198,9 @@ error_code sys_event_flag_wait(ppu_thread& ppu, u32 id, u64 bitptn, u32 mode, vm
+ 		return CELL_OK;
+ 	}
+ 
++#ifdef __PROSPERO__
++	ps5_frame_trace::long_wait ps5_ppu_wait(ps5_frame_trace::event::ppu_flag_wait_begin, ppu.id);
++#endif
+ 	while (auto state = +ppu.state)
+ 	{
+ 		if (state & cpu_flag::signal && ppu.state.test_and_reset(cpu_flag::signal))
+diff --git a/rpcs3/Emu/Cell/lv2/sys_rsx.cpp b/rpcs3/Emu/Cell/lv2/sys_rsx.cpp
+index 2573dcdbf..87f868013 100644
+--- a/rpcs3/Emu/Cell/lv2/sys_rsx.cpp
++++ b/rpcs3/Emu/Cell/lv2/sys_rsx.cpp
+@@ -1,4 +1,7 @@
+ #include "stdafx.h"
++#ifdef __PROSPERO__
++#include "Emu/RSX/ps5_frame_trace.h"
++#endif
+ #include "sys_rsx.h"
+ 
+ #include "Emu/System.h"
+@@ -835,6 +838,9 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
+ 
+ 	case 0x102: // Display flip
+ 	{
++#ifdef __PROSPERO__
++		ps5_frame_trace::mark(ps5_frame_trace::event::guest_flip, static_cast<u32>(a4));
++#endif
+ 		u32 flip_idx = ~0u;
+ 
+ 		// high bit signifys grabbing a queued buffer
+@@ -889,6 +895,9 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
+ 	}
+ 	case 0x103: // Display Queue
+ 	{
++#ifdef __PROSPERO__
++		ps5_frame_trace::guest_queue(static_cast<u32>(a4));
++#endif
+ 		// NOTE: There currently seem to only be 2 active heads on PS3
+ 		ensure(a3 < 2);
+ 
+@@ -896,6 +905,9 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
+ 		driverInfo.head[a3].flipFlags |= 0x40000000 | (1 << a4);
+ 
+ 		render->on_frame_end(ctx, static_cast<u32>(a4));
++#ifdef __PROSPERO__
++		ps5_frame_trace::mark(ps5_frame_trace::event::guest_queue_end, static_cast<u32>(a4));
++#endif
+ 		if (!render->send_event(ctx, 0, SYS_RSX_EVENT_QUEUE_BASE << a3, 0))
+ 		{
+ 			break;
+diff --git a/rpcs3/Emu/Cell/lv2/sys_semaphore.cpp b/rpcs3/Emu/Cell/lv2/sys_semaphore.cpp
+index dea96fcf5..178d6847d 100644
+--- a/rpcs3/Emu/Cell/lv2/sys_semaphore.cpp
++++ b/rpcs3/Emu/Cell/lv2/sys_semaphore.cpp
+@@ -1,4 +1,7 @@
+ #include "stdafx.h"
++#ifdef __PROSPERO__
++#include "Emu/RSX/ps5_frame_trace.h"
++#endif
+ #include "sys_semaphore.h"
+ 
+ #include "Emu/IdManager.h"
+@@ -157,6 +160,9 @@ error_code sys_semaphore_wait(ppu_thread& ppu, u32 sem_id, u64 timeout)
+ 
+ 	ppu.gpr[3] = CELL_OK;
+ 
++#ifdef __PROSPERO__
++	ps5_frame_trace::long_wait ps5_ppu_wait(ps5_frame_trace::event::ppu_sema_wait_begin, ppu.id);
++#endif
+ 	while (auto state = +ppu.state)
+ 	{
+ 		if (state & cpu_flag::signal && ppu.state.test_and_reset(cpu_flag::signal))
+diff --git a/rpcs3/Emu/RSX/VK/VKCommandStream.cpp b/rpcs3/Emu/RSX/VK/VKCommandStream.cpp
+index c33ad4c76..10a208b6b 100644
+--- a/rpcs3/Emu/RSX/VK/VKCommandStream.cpp
++++ b/rpcs3/Emu/RSX/VK/VKCommandStream.cpp
+@@ -1,4 +1,7 @@
+ #include "stdafx.h"
++#ifdef __PROSPERO__
++#include "Emu/RSX/ps5_frame_trace.h"
++#endif
+ #include "VKCommandStream.h"
+ #include "VKResourceManager.h"
+ #include "vkutils/descriptors.h"
+@@ -42,7 +45,13 @@ namespace vk
+ 			.pSignalSemaphores = submit_info.signal_semaphores.data()
+ 		};
+ 
++#ifdef __PROSPERO__
++		ps5_frame_trace::mark(ps5_frame_trace::event::vk_submit_begin);
++#endif
+ 		vkQueueSubmit(submit_info.queue, 1, &info, submit_info.pfence->handle);
++#ifdef __PROSPERO__
++		ps5_frame_trace::mark(ps5_frame_trace::event::vk_submit_end);
++#endif
+ 		release_global_submit_lock();
+ 
+ 		// Signal fence
+diff --git a/rpcs3/Emu/RSX/VK/VKPresent.cpp b/rpcs3/Emu/RSX/VK/VKPresent.cpp
+index 4afff8452..942df0088 100644
+--- a/rpcs3/Emu/RSX/VK/VKPresent.cpp
++++ b/rpcs3/Emu/RSX/VK/VKPresent.cpp
+@@ -1,4 +1,7 @@
+ #include "stdafx.h"
++#ifdef __PROSPERO__
++#include "Emu/RSX/ps5_frame_trace.h"
++#endif
+ #include "VKCommandStream.h"
+ #include "VKGSRender.h"
+ #include "vkutils/buffer_object.h"
+@@ -151,6 +154,9 @@ bool VKGSRender::reinitialize_swapchain()
+ 
+ void VKGSRender::present(vk::frame_context_t *ctx)
+ {
++#ifdef __PROSPERO__
++	ps5_frame_trace::mark(ps5_frame_trace::event::vk_present_begin);
++#endif
+ 	ensure(ctx->present_image != umax);
+ 
+ 	// Partial CS flush
+@@ -179,6 +185,9 @@ void VKGSRender::present(vk::frame_context_t *ctx)
+ 		}
+ 	}
+ 
++#ifdef __PROSPERO__
++	ps5_frame_trace::mark(ps5_frame_trace::event::vk_present_end);
++#endif
+ 	// Presentation image released; reset value
+ 	ctx->present_image = -1;
+ }
+@@ -434,6 +443,9 @@ vk::viewable_image* VKGSRender::get_present_source(/* inout */ vk::present_surfa
+ 
+ bool VKGSRender::present_frame(const rsx::display_flip_info_t& info)
+ {
++#ifdef __PROSPERO__
++	ps5_frame_trace::mark(ps5_frame_trace::event::rsx_present_begin, info.buffer);
++#endif
+ 	if (m_device->is_lost())
+ 	{
+ 		// A lost device presents nothing. The core replaces the renderer.
+@@ -613,6 +625,9 @@ bool VKGSRender::present_frame(const rsx::display_flip_info_t& info)
+ 	ensure(m_current_frame->swap_command_buffer == nullptr);
+ 
+ 	u64 timeout = m_swapchain->get_swap_image_count() <= 2? 0ull: 100000000ull;
++#ifdef __PROSPERO__
++	ps5_frame_trace::mark(ps5_frame_trace::event::vk_acquire_begin);
++#endif
+ 	while (VkResult status = m_swapchain->acquire_next_swapchain_image(m_current_frame->acquire_signal_semaphore, timeout, &m_current_frame->present_image))
+ 	{
+ 		switch (status)
+@@ -653,6 +668,9 @@ bool VKGSRender::present_frame(const rsx::display_flip_info_t& info)
+ 		}
+ 	}
+ 
++#ifdef __PROSPERO__
++	ps5_frame_trace::mark(ps5_frame_trace::event::vk_acquire_end);
++#endif
+ 	// Confirm that the driver did not silently fail
+ 	ensure(m_current_frame->present_image != umax);
+ 
+@@ -1007,6 +1025,9 @@ bool VKGSRender::present_frame(const rsx::display_flip_info_t& info)
+ 	m_ctx->stats.flip_time = m_profiler.duration();
+ 
+ 	m_frame->flip(m_context);
++#ifdef __PROSPERO__
++	ps5_frame_trace::mark(ps5_frame_trace::event::rsx_present_end, info.buffer);
++#endif
+ 	return true;
+ }
+ 
+diff --git a/rpcs3/Emu/RSX/VK/vkutils/sync.cpp b/rpcs3/Emu/RSX/VK/vkutils/sync.cpp
+index 55006e37d..f4f4e8256 100644
+--- a/rpcs3/Emu/RSX/VK/vkutils/sync.cpp
++++ b/rpcs3/Emu/RSX/VK/vkutils/sync.cpp
+@@ -5,6 +5,9 @@
+ #include "garbage_collector.h"
+ #include "sync.h"
+ #include "shared.h"
++#ifdef __PROSPERO__
++#include "Emu/RSX/ps5_frame_trace.h"
++#endif
+ 
+ #include "Emu/Cell/timers.hpp"
+ 
+@@ -568,6 +571,13 @@ namespace vk
+ 
+ 	VkResult wait_for_fence(fence* pFence, u64 timeout)
+ 	{
++#ifdef __PROSPERO__
++		struct fence_scope
++		{
++			fence_scope() { ps5_frame_trace::mark(ps5_frame_trace::event::vk_fence_begin); }
++			~fence_scope() { ps5_frame_trace::mark(ps5_frame_trace::event::vk_fence_end); }
++		} ps5_fence_scope;
++#endif
+ 		pFence->wait_flush();
+ 
+ 		if (timeout)
+diff --git a/rpcs3/Emu/RSX/ps5_frame_trace.h b/rpcs3/Emu/RSX/ps5_frame_trace.h
+new file mode 100644
+index 000000000..a74b5af2a
+--- /dev/null
++++ b/rpcs3/Emu/RSX/ps5_frame_trace.h
+@@ -0,0 +1,117 @@
++// PS5-only sparse CPU timeline; captures overlapping pipeline activity, not GPU duration.
++// Records only one in 32 guest display-queue epochs and PPU waits over 500 us.
++// Fixed-size atomic ring: no logging or allocation on guest/renderer threads.
++#pragma once
++#ifdef __PROSPERO__
++#include <atomic>
++#include <cstdint>
++#include "util/tsc.hpp"
++#include "util/sysinfo.hpp"
++
++namespace ps5_frame_trace
++{
++    enum class event : unsigned
++    {
++        guest_queue_begin = 1,
++        guest_queue_end,
++        guest_flip,
++        rsx_present_begin,
++        rsx_present_end,
++        vk_acquire_begin,
++        vk_acquire_end,
++        vk_submit_begin,
++        vk_submit_end,
++        vk_present_begin,
++        vk_present_end,
++        vk_fence_begin,
++        vk_fence_end,
++        ppu_event_wait_begin,
++        ppu_event_wait_end,
++        ppu_flag_wait_begin,
++        ppu_flag_wait_end,
++        ppu_sema_wait_begin,
++        ppu_sema_wait_end,
++    };
++
++    inline constexpr std::uint64_t ring_size = 4096;
++    struct entry
++    {
++        std::atomic<std::uint64_t> seq{0};
++        std::atomic<std::uint64_t> tsc{0};
++        std::atomic<std::uint64_t> payload{0};
++    };
++    inline entry ring[ring_size];
++    inline std::atomic<std::uint64_t> written{0};
++    inline std::atomic<std::uint32_t> epoch{0};
++    inline std::atomic<bool> sampled{false};
++
++    inline void stamp(event kind, std::uint32_t arg, std::uint32_t frame, std::uint64_t tsc) noexcept
++    {
++        const std::uint64_t pos = written.fetch_add(1, std::memory_order_relaxed);
++        entry& item = ring[pos % ring_size];
++        item.seq.store(0, std::memory_order_release);
++        item.tsc.store(tsc, std::memory_order_relaxed);
++        item.payload.store((static_cast<std::uint64_t>(frame & 0xffffffu) << 40)
++            | (static_cast<std::uint64_t>(arg) << 8)
++            | static_cast<unsigned>(kind), std::memory_order_relaxed);
++        item.seq.store(pos + 1, std::memory_order_release);
++    }
++
++    inline void mark(event kind, std::uint32_t arg = 0) noexcept
++    {
++        if (!sampled.load(std::memory_order_relaxed)) return;
++        const auto frame = epoch.load(std::memory_order_relaxed);
++        stamp(kind, arg, frame, utils::get_tsc());
++    }
++
++    // Start a new sampled wall-time epoch at the PS3 guest's display queue syscall.
++    // The sampled epoch spans one queue-to-queue interval. It does not guarantee
++    // asynchronous GPU submissions belong to that particular guest frame.
++    inline void guest_queue(std::uint32_t buffer) noexcept
++    {
++        const auto next = epoch.fetch_add(1, std::memory_order_relaxed) + 1;
++        const bool enabled = (next % 32u == 0u);
++        sampled.store(enabled, std::memory_order_relaxed);
++        if (enabled) stamp(event::guest_queue_begin, buffer, next, utils::get_tsc());
++    }
++
++    // Longer guest PPU host waits only. Scoped after the immediate fast path has
++    // failed, so these represent actual time spent on the blocking path.
++    struct long_wait
++    {
++        const event kind;
++        const std::uint32_t arg;
++        const std::uint32_t frame;
++        const std::uint64_t started;
++        explicit long_wait(event k, std::uint32_t identifier) noexcept
++            : kind(k), arg(identifier),
++              frame(sampled.load(std::memory_order_relaxed)
++                        ? epoch.load(std::memory_order_relaxed) : 0),
++              started(frame ? utils::get_tsc() : 0) {}
++        ~long_wait() noexcept
++        {
++            if (!started) return;
++            const auto finished = utils::get_tsc();
++            const auto freq = utils::get_tsc_freq();
++            if (!freq || finished < started || finished - started < freq / 2000u) return;
++            stamp(kind, arg, frame, started);
++            stamp(static_cast<event>(static_cast<unsigned>(kind) + 1), arg, frame, finished);
++        }
++    };
++
++    struct record
++    {
++        std::uint64_t pos, tsc, payload;
++    };
++    inline bool read(std::uint64_t pos, record& out) noexcept
++    {
++        const entry& item = ring[pos % ring_size];
++        if (item.seq.load(std::memory_order_acquire) != pos + 1) return false;
++        const auto payload = item.payload.load(std::memory_order_relaxed);
++        const auto tsc = item.tsc.load(std::memory_order_relaxed);
++        if (item.seq.load(std::memory_order_acquire) != pos + 1) return false;
++        out = {pos, tsc, payload};
++        return true;
++    }
++}
++#endif
+diff --git a/rpcs3/ps5/ps5_frontend.cpp b/rpcs3/ps5/ps5_frontend.cpp
+index aa6021f10..03d1ade58 100644
+--- a/rpcs3/ps5/ps5_frontend.cpp
++++ b/rpcs3/ps5/ps5_frontend.cpp
+@@ -21,6 +21,7 @@
+ #include "Emu/RSX/RSXThread.h"
+ #ifdef __PROSPERO__
+ #include "Emu/RSX/ps5_rsx_perf.h"
++#include "Emu/RSX/ps5_frame_trace.h"
+ #endif
+ #include "Emu/RSX/Null/NullGSRender.h"
+ #include "Emu/RSX/VK/VKGSRender.h"
+@@ -976,6 +977,48 @@ void start_watchdog()
+ 					sys_log.notice("PS5 TIMING: guest/host %.3f, vblank %.1f/s", guest_ratio, vblank_hz);
+ 				}
+ 				sys_log.notice("PS5 CPU: %s", ps5_thread_cpu_report(window_ms * 1'000'000, 14));
++
++#ifdef __PROSPERO__
++                // Sparse cross-thread CPU timeline: drain the fixed ring on the
++                // watchdog only. Never log or allocate on the guest/RSX threads.
++                // A sample epoch is a guest display-queue-to-queue interval,
++                // NOT proof that every asynchronous event belongs to its frame.
++                {
++                    static std::uint64_t cursor = 0;
++                    const auto end = ps5_frame_trace::written.load(std::memory_order_acquire);
++                    std::uint64_t skipped = 0, emitted = 0, missed = 0;
++                    const auto first = end > 256 ? end - 256 : 0;
++                    if (cursor < first)
++                    {
++                        skipped = first - cursor;
++                        cursor = first;
++                    }
++                    const auto freq = utils::get_tsc_freq();
++                    for (; cursor < end; ++cursor)
++                    {
++                        ps5_frame_trace::record record{};
++                        if (!ps5_frame_trace::read(cursor, record))
++                        {
++                            ++missed;
++                            continue;
++                        }
++                        const auto frame = static_cast<unsigned>((record.payload >> 40) & 0xffffffu);
++                        const auto arg = static_cast<unsigned>((record.payload >> 8) & 0xffffffffu);
++                        const auto kind = static_cast<unsigned>(record.payload & 0xffu);
++                        sys_log.notice("PS5 FRAMEDEP: seq %llu epoch %u kind %u arg %u tsc %llu",
++                            static_cast<unsigned long long>(record.pos),
++                            frame, kind, arg, static_cast<unsigned long long>(record.tsc));
++                        ++emitted;
++                    }
++                    if (emitted || skipped || missed)
++                        sys_log.notice("PS5 FRAMEDEP2: window %u ms emitted %llu skipped %llu missed %llu tsc_hz %llu total %llu",
++                            window_ms, static_cast<unsigned long long>(emitted),
++                            static_cast<unsigned long long>(skipped),
++                            static_cast<unsigned long long>(missed),
++                            static_cast<unsigned long long>(freq),
++                            static_cast<unsigned long long>(end));
++                }
++#endif
+ #if defined(__PROSPERO__) && PS5_RSX_PERF_ACTIVE
+ 				{
+ 					using ps5_rsx_perf::stage;

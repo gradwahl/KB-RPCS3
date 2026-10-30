@@ -1,0 +1,69 @@
+From fc4f6592fdc4728fe7974ea0c2d77d39d1bc30b4 Mon Sep 17 00:00:00 2001
+From: KB-RPCS3 local build <local-build@localhost>
+Date: Thu, 29 Oct 2026 23:48:23 +0000
+Subject: [PATCH 49/49] PS5: add bounded RSX DMA waits for controlled profiling
+
+---
+ rpcs3/Emu/RSX/RSXOffload.cpp | 30 ++++++++++++++++++++++++++++--
+ 1 file changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/rpcs3/Emu/RSX/RSXOffload.cpp b/rpcs3/Emu/RSX/RSXOffload.cpp
+index 493fc8cc9..4ccfda91a 100644
+--- a/rpcs3/Emu/RSX/RSXOffload.cpp
++++ b/rpcs3/Emu/RSX/RSXOffload.cpp
+@@ -11,6 +11,11 @@
+ #include <thread>
+ #include "util/asm.hpp"
+ 
++#ifdef __PROSPERO__
++extern "C" s64 rpcs3ps5_tune(int key);
++enum { PS5_TUNE_RSX_DMA_WAIT_US = 10 };
++#endif
++
+ namespace rsx
+ {
+ 	struct dma_manager::offload_thread
+@@ -164,6 +169,27 @@ namespace rsx
+ 	{
+ 		auto& _thr = *m_thread;
+ 
++#ifdef __PROSPERO__
++		const s64 wait_us = std::clamp<s64>(rpcs3ps5_tune(PS5_TUNE_RSX_DMA_WAIT_US), 0, 2000);
++		u32 spins = 0;
++#endif
++		auto wait_for_progress = [&]
++		{
++#ifdef __PROSPERO__
++			// Yield CPU time to the offloader after a short spin. Keep the wait
++			// bounded so the RSX caller can continue servicing renderer callbacks.
++			if (wait_us > 0 && ++spins >= 64)
++			{
++				spins = 0;
++				const u64 processed = _thr.m_processed_count.load();
++				if (_thr.m_enqueued_count.load() > processed)
++					_thr.m_processed_count.wait(processed, atomic_wait_timeout{static_cast<u64>(wait_us) * 1000});
++				return;
++			}
++#endif
++			utils::pause();
++		};
++
+ 		if (_thr.m_enqueued_count.load() <= _thr.m_processed_count.load()) [[likely]]
+ 		{
+ 			// Nothing to do
+@@ -181,13 +207,13 @@ namespace rsx
+ 			while (_thr.m_enqueued_count.load() > _thr.m_processed_count.load())
+ 			{
+ 				rsxthr->renderer()->on_semaphore_acquire_wait();
+-				utils::pause();
++				wait_for_progress();
+ 			}
+ 		}
+ 		else
+ 		{
+ 			while (_thr.m_enqueued_count.load() > _thr.m_processed_count.load())
+-				utils::pause();
++				wait_for_progress();
+ 		}
+ 
+ 		return true;
