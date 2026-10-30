@@ -21,6 +21,8 @@
 #include <stdint.h>
 #include <time.h>
 
+#define PS5_RSX_PERF_ACTIVE 0
+
 int sceKernelClockGettime(clockid_t clock, struct timespec *ts);
 uint64_t sceKernelGetTscFrequency(void);
 
@@ -37,6 +39,47 @@ static inline void cpu_relax(void)
 }
 
 /* 0: not yet, 1: in progress, 2: ready */
+#if PS5_RSX_PERF_ACTIVE
+/* Diagnostic call counts use thread-local batches to avoid an atomic
+ * increment on every fast-clock call or yield. Totals may lag by up to
+ * 1023 clock calls and 255 yield decisions PER THREAD at report time.
+ * These are global (all RPCS3 threads), not RSX-exclusive counts. */
+static _Atomic uint64_t g_stat_clock_calls, g_stat_yield_spin;
+static _Atomic uint64_t g_stat_yield_os, g_stat_yield_sleep;
+static _Thread_local unsigned t_clock_batch, t_yield_batch;
+static _Thread_local unsigned t_spin_batch, t_os_batch, t_sleep_batch;
+
+static inline void ps5_clock_count(void)
+{
+    if (++t_clock_batch == 1024) {
+        t_clock_batch = 0;
+        atomic_fetch_add_explicit(&g_stat_clock_calls, 1024, memory_order_relaxed);
+    }
+}
+
+static inline void ps5_yield_count(unsigned type)
+{
+    if (type == 0) ++t_spin_batch;
+    else if (type == 1) ++t_os_batch;
+    else ++t_sleep_batch;
+    if (++t_yield_batch == 256) {
+        atomic_fetch_add_explicit(&g_stat_yield_spin, t_spin_batch, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_stat_yield_os, t_os_batch, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_stat_yield_sleep, t_sleep_batch, memory_order_relaxed);
+        t_yield_batch = t_spin_batch = t_os_batch = t_sleep_batch = 0;
+    }
+}
+
+void rpcs3ps5_fastclock_stats_take(uint64_t *clock_calls, uint64_t *spin,
+                                   uint64_t *os_yield, uint64_t *sleep_calls)
+{
+    *clock_calls = atomic_exchange_explicit(&g_stat_clock_calls, 0, memory_order_relaxed);
+    *spin = atomic_exchange_explicit(&g_stat_yield_spin, 0, memory_order_relaxed);
+    *os_yield = atomic_exchange_explicit(&g_stat_yield_os, 0, memory_order_relaxed);
+    *sleep_calls = atomic_exchange_explicit(&g_stat_yield_sleep, 0, memory_order_relaxed);
+}
+
+#endif // PS5_RSX_PERF_ACTIVE
 static atomic_int g_state;
 static uint64_t g_base_tsc, g_base_ns, g_freq;
 
@@ -88,6 +131,9 @@ static int is_monotonic(clockid_t clock)
 
 int rpcs3ps5_clock_gettime(clockid_t clock, struct timespec *ts)
 {
+#if PS5_RSX_PERF_ACTIVE
+    ps5_clock_count();
+#endif
     if (!ts || !is_monotonic(clock) || (atomic_load_explicit(&g_state, memory_order_acquire) != 2 && !anchor()))
         return sceKernelClockGettime(clock, ts);
     const uint64_t ticks = tsc_now() - g_base_tsc;
@@ -109,8 +155,12 @@ int sceKernelUsleep(unsigned int microseconds);
 
 int rpcs3ps5_sched_yield(void)
 {
-    if (atomic_load_explicit(&g_state, memory_order_acquire) != 2 && !anchor())
+    if (atomic_load_explicit(&g_state, memory_order_acquire) != 2 && !anchor()) {
+        #if PS5_RSX_PERF_ACTIVE
+        ps5_yield_count(1);
+        #endif
         return scePthreadYield();
+    }
     const uint64_t now = tsc_now();
     if (now - t_last_yield < g_freq / 10000) { /* calls within 100 us of each other: one idle stretch */
         t_burst++;
@@ -121,15 +171,24 @@ int rpcs3ps5_sched_yield(void)
     /* Idle for over half a millisecond (an RSX thread with nothing to draw): really sleep, so the core's other
      * thread (often an SPU thread) runs at full speed; the console's shortest sleep is ~100 us */
     if (now - t_burst_start > g_freq / 2000) {
+        #if PS5_RSX_PERF_ACTIVE
+        ps5_yield_count(2);
+        #endif
         sceKernelUsleep(1);
         t_last_yield = tsc_now();
         return 0;
     }
     if (t_burst % 4 == 3) {
+        #if PS5_RSX_PERF_ACTIVE
+        ps5_yield_count(1);
+        #endif
         scePthreadYield();
         t_last_yield = tsc_now();
         return 0;
     }
+    #if PS5_RSX_PERF_ACTIVE
+    ps5_yield_count(0);
+    #endif
     const uint64_t until = now + g_freq / 500000; /* 2 us */
     do
         cpu_relax();
