@@ -8,7 +8,9 @@
 #   EXTRA_CFLAGS    appended to CMAKE_C_FLAGS and CMAKE_CXX_FLAGS (e.g. "-fno-emulated-tls")
 #   CONFIGURE_ONLY  1 = configure and stop (inspect the flags before a long build)
 set -euo pipefail
-export PATH=$HOME/.local/bin:$PATH LLVM_CONFIG=/usr/lib/llvm-22/bin/llvm-config PS5_CLANG=/usr/bin/clang
+export PATH=$HOME/.local/bin:$PATH
+export LLVM_CONFIG=${LLVM_CONFIG:-/usr/lib/llvm-22/bin/llvm-config}
+export PS5_CLANG=${PS5_CLANG:-/usr/bin/clang}
 W=$HOME/work
 SRC=${SRC_DIR:-$W/rpcs3}
 B=${BUILD_DIR:-$W/rpcs3-build}

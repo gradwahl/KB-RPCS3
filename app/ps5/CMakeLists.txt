@@ -153,7 +153,8 @@ endif()
 add_custom_command(
 	OUTPUT ${CMAKE_BINARY_DIR}/eboot.elf
 	COMMAND ${CMAKE_COMMAND} -E env RPCS3_LINK_INPUTS=${RPCS3_LINK_INPUTS} bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/link-title.sh ${CMAKE_BINARY_DIR} ${PS5_VULKAN_DIR} ${PS5_PAYLOAD_SDK} "$<TARGET_OBJECTS:samples>"
-	DEPENDS samples "$<TARGET_OBJECTS:samples>" ${CMAKE_CURRENT_SOURCE_DIR}/tools/link-title.sh ${rpcs3_link_depends}
+	DEPENDS samples "$<TARGET_OBJECTS:samples>" ${CMAKE_CURRENT_SOURCE_DIR}/tools/link-title.sh
+		${CMAKE_CURRENT_SOURCE_DIR}/tools/check-native-tls.py ${CMAKE_CURRENT_SOURCE_DIR}/ld/ps5-pie.ld ${rpcs3_link_depends}
 	COMMAND_EXPAND_LISTS
 	VERBATIM)
 add_custom_target(title ALL DEPENDS ${CMAKE_BINARY_DIR}/eboot.elf)

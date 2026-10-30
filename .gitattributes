@@ -1,0 +1,6 @@
+# Bash entry points are executed from the Windows checkout inside WSL.
+/port/*.sh text eol=lf
+/tools/wsl-build*.sh text eol=lf
+# Preserve carriage returns embedded in patch hunks for upstream CRLF files.
+/port/rpcs3-patches/*.patch -text
+/port/rpcs3-latest-patches/*.patch -text

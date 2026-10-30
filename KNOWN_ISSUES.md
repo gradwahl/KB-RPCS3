@@ -24,12 +24,18 @@ debug checks can be switched on with a tuning file (`BUILDING.md` §5). None of 
 normal game speed yet. The narrow-store option must not be used before its equivalence check
 (`spu_narrow_ls_check 1`) has run clean on real hardware.
 
-## Native TLS does not work on the PS5
+## Native TLS is experimental
 
 KB-RPCS3 uses compiler-emulated thread-local storage. A test build with native TLS started, but every
 `thread_local` with a non-zero initial value read as zero, which broke RPCS3 (GTA IV ran at about
 0.5 FPS with fatal "Inconsistency for array slot 0" errors). The cause is still being investigated with
-the standalone probes in `tools/tlsprobe/`. Do not build with `-fno-emulated-tls`.
+the standalone probes in `tools/tlsprobe/`. Emulated TLS remains the default.
+
+For controlled native testing on Ubuntu WSL, use `bash tools/wsl-build-native.sh`
+(`WSL_BUILD.md`). This rebuilds the core and title with matching native TLS flags
+in separate directories. It requires the PS5_Vulkan converter fix that preserves
+the TLS alignment and includes the initial TLS template in the writable PT_LOAD.
+A successful standalone probe does not establish full RPCS3 compatibility.
 
 ## Other
 

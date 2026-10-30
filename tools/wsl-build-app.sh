@@ -31,6 +31,20 @@ for path in "$PS5_CLANG" "$LLVM_CONFIG" "$repo/app/ps5/tools/build.sh" \
     [[ -e "$path" ]] || { echo "Missing: $path" >&2; exit 2; }
 done
 [[ -s "$links" ]] || { echo "RPCS3 archive list missing: $links" >&2; exit 2; }
+if [[ $native_tls == ON ]]; then
+    python3 - "$(dirname "$links")/CMakeCache.txt" <<'PY'
+import sys
+with open(sys.argv[1]) as source:
+    cache = source.read().splitlines()
+for language in ('C', 'CXX'):
+    flags = next((line.split('=', 1)[1] for line in cache
+                  if line.startswith(f'CMAKE_{language}_FLAGS:')), '')
+    if not all(flag in flags.split() for flag in
+               ('-fno-emulated-tls', '-ftls-model=initial-exec')):
+        raise SystemExit('Native title requires native core archives. '
+                         'Run tools/wsl-build-native.sh.')
+PY
+fi
 [[ -d "$vulkan" ]] || { echo "Missing PS5_Vulkan checkout: $vulkan" >&2; exit 2; }
 [[ "$app" != "$repo/app" ]] || { echo "APP_DIR must be a separate build copy." >&2; exit 2; }
 
