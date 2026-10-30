@@ -2,3 +2,7 @@ dist/
 results/
 .DS_Store
 *.o
+
+# Local Python bytecode, not source artifacts.
+__pycache__/
+*.pyc
