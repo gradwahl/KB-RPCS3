@@ -1,0 +1,152 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Fri, 30 Oct 2026 22:30:00 +0000
+Subject: [PATCH] PS5: gate PUTLL reporting timers and disable heavy helper probes
+
+Construct disabled reporting meters at PUTLLC/PUTLLUC entry when reporting
+is off. Keep GETLLAR functional timestamps and guest reservation protocol
+unchanged. PS5_MFC_METER_GATE=0 builds a matched control, 1 the candidate.
+PS5_SPU_HELPER_ACTIVE defaults to 0, compiling 0063 boundary probes/logs out
+in both variants. Boot log identifies the compiled modes. Low-rate 0062
+worker coverage and RSX sampling remain identical in both versions.
+Dynamic reporting enable during a call starts measurements on the next
+invocation. This diagnostic difference is intentional; no FPS win claimed.
+
+---
+diff --git a/rpcs3/Emu/Cell/SPUThread.cpp b/rpcs3/Emu/Cell/SPUThread.cpp
+--- a/rpcs3/Emu/Cell/SPUThread.cpp
++++ b/rpcs3/Emu/Cell/SPUThread.cpp
+@@ -1,6 +1,7 @@
+ #include "stdafx.h"
+ #ifdef __PROSPERO__
+ #include "Emu/RSX/ps5_worker_activity.h"
++#include "ps5_mfc_meter.h"
+ #endif
+ #include "Utilities/JIT.h"
+ #include "Utilities/date_time.h"
+@@ -3508,7 +3509,14 @@
+ 
+ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
+ {
++#if defined(__PROSPERO__) && PS5_MFC_METER_GATE
++	// Reporting-only timer. Enable at entry; leave GETLLAR timers untouched.
++	perf_meter<"PUTLLC-"_u64> perf0(0);
++	if (g_cfg.core.perf_report)
++		perf0.restart();
++#else
+ 	perf_meter<"PUTLLC-"_u64> perf0;
++#endif
+ 	perf_meter<"PUTLLC+"_u64> perf1 = perf0;
+ 
+ 	// Store conditionally
+@@ -3835,7 +3843,14 @@
+ 
+ void spu_thread::do_putlluc(const spu_mfc_cmd& args)
+ {
++#if defined(__PROSPERO__) && PS5_MFC_METER_GATE
++	// Reporting-only timer. Enable at entry; leave GETLLAR timers untouched.
++	perf_meter<"PUTLLUC"_u64> perf0(0);
++	if (g_cfg.core.perf_report)
++		perf0.restart();
++#else
+ 	perf_meter<"PUTLLUC"_u64> perf0;
++#endif
+ 
+ 	const u32 addr = args.eal & -128;
+ 
+diff --git a/rpcs3/Emu/RSX/ps5_worker_activity.h b/rpcs3/Emu/RSX/ps5_worker_activity.h
+--- a/rpcs3/Emu/RSX/ps5_worker_activity.h
++++ b/rpcs3/Emu/RSX/ps5_worker_activity.h
+@@ -7,6 +7,11 @@
+ #include <cstdint>
+ #include "util/tsc.hpp"
+ 
++// Opt in only for diagnostic builds; compiled away in normal/control builds.
++#ifndef PS5_SPU_HELPER_ACTIVE
++#define PS5_SPU_HELPER_ACTIVE 0
++#endif
++
+ namespace ps5_worker_activity
+ {
+     enum class stage : unsigned
+@@ -133,6 +138,7 @@
+     };
+     inline helper_probe begin_helper(std::uint32_t id, helper_kind kind, unsigned arg) noexcept
+     {
++        if constexpr (!PS5_SPU_HELPER_ACTIVE) return {};
+         if (!id || static_cast<unsigned>(kind) >= helper_count) return {};
+         static thread_local worker_slot* cached = nullptr;
+         if (!cached || cached->id.load(std::memory_order_relaxed) != id)
+@@ -154,6 +160,7 @@
+     }
+     inline void end_helper(helper_probe probe) noexcept
+     {
++        if constexpr (!PS5_SPU_HELPER_ACTIVE) return;
+         if (!probe.slot) return;
+         auto& stats = probe.slot->helpers[static_cast<unsigned>(probe.kind)];
+         probe.slot->helper_start.store(0, std::memory_order_release);
+@@ -166,6 +173,7 @@
+     }
+     inline void escape_helper(worker_slot* slot) noexcept
+     {
++        if constexpr (!PS5_SPU_HELPER_ACTIVE) return;
+         const auto start = slot->helper_start.exchange(0, std::memory_order_acq_rel);
+         if (!start) return;
+         const auto kind = slot->helper_current.load(std::memory_order_relaxed);
+@@ -186,6 +194,7 @@
+     };
+     inline helper_snapshot observe_helper(const worker_slot& slot) noexcept
+     {
++        if constexpr (!PS5_SPU_HELPER_ACTIVE) return {};
+         const auto start = slot.helper_start.load(std::memory_order_acquire);
+         const auto kind = slot.helper_current.load(std::memory_order_relaxed);
+         const auto arg = slot.helper_arg.load(std::memory_order_relaxed);
+diff --git a/rpcs3/ps5/ps5_frontend.cpp b/rpcs3/ps5/ps5_frontend.cpp
+--- a/rpcs3/ps5/ps5_frontend.cpp
++++ b/rpcs3/ps5/ps5_frontend.cpp
+@@ -23,6 +23,7 @@
+ #include "Emu/RSX/ps5_rsx_perf.h"
+ #include "Emu/RSX/ps5_frame_trace.h"
+ #include "Emu/RSX/ps5_worker_activity.h"
++#include "Emu/Cell/ps5_mfc_meter.h"
+ #endif
+ #include "Emu/RSX/Null/NullGSRender.h"
+ #include "Emu/RSX/VK/VKGSRender.h"
+@@ -1059,6 +1060,7 @@
+                                 static_cast<unsigned long long>(coverage.cpu_work_entries),
+                                 static_cast<unsigned long long>(coverage.cpu_work_sample_active), work_age_us,
+                                 static_cast<unsigned long long>(coverage.cpu_work_abandoned));
++#if PS5_SPU_HELPER_ACTIVE
+                             const auto helper = ps5_worker_activity::observe_helper(slot);
+                             const double helper_age_us = clock_hz ? 1'000'000.0 * helper.age_tsc / clock_hz : 0;
+                             sys_log.notice("PS5 SPUHELP: v1 id 0x%x active %u stable %u kind %u arg %u age_us %.3f nested %llu",
+@@ -1084,6 +1086,7 @@
+                                     to_us(stats.escaped_samples.total_tsc.load(std::memory_order_relaxed)),
+                                     to_us(stats.escaped_samples.max_tsc.load(std::memory_order_relaxed)));
+                             }
++#endif
+                             emit("spu", id, stage::spu_gateway, slot.stats[0]);
+                             emit("spu", id, stage::spu_cpu_work, slot.stats[1]);
+                         }
+@@ -1247,6 +1250,10 @@
+ 		g_cfg.core.clocks_scale.get(), fmt::format("{}", g_cfg.video.frame_limit.get()).c_str(),
+ 		g_cfg.video.vblank_rate.get());
+ 
++#ifdef __PROSPERO__
++	sys_log.notice("PS5 MFCMETER: gate %u helper_probes %u", unsigned{PS5_MFC_METER_GATE}, unsigned{PS5_SPU_HELPER_ACTIVE});
++#endif
++
+ 	// Stand in for Qt's event loop until the game ends
+ 	u64 touch_held_ms = 0;
+ 	bool stop_requested = false;
+diff --git a/rpcs3/Emu/Cell/ps5_mfc_meter.h b/rpcs3/Emu/Cell/ps5_mfc_meter.h
+new file mode 100644
+--- /dev/null
++++ b/rpcs3/Emu/Cell/ps5_mfc_meter.h
+@@ -0,0 +1,6 @@
++// PS5-only compile-time experiment. 0 = matched control, 1 = candidate.
++// No runtime lookup in reservation helpers. GETLLAR functional timers stay.
++#pragma once
++#ifndef PS5_MFC_METER_GATE
++#define PS5_MFC_METER_GATE 1
++#endif

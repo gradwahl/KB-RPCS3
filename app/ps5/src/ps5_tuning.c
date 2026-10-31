@@ -46,25 +46,28 @@ enum {
 	PS5_TUNE_SPU_JIT_VERIFY,
 	PS5_TUNE_SPU_NARROW_LS_CHECK,
 	PS5_TUNE_RSX_DMA_WAIT_US,
+	PS5_TUNE_RSX_FIFO_YIELD,
 	PS5_TUNE_COUNT
 };
 
 static const char *const g_names[PS5_TUNE_COUNT] = {
 	"radv_spin_us", "radv_sleep_us", "vk_event_spin_us", "vk_event_sleep_us", "rsx_cpu",
 	"spu_insert_select", "spu_narrow_ls_store", "spu_hot_cpu",
-	"spu_jit_verify", "spu_narrow_ls_check", "rsx_dma_wait_us" };
+	"spu_jit_verify", "spu_narrow_ls_check", "rsx_dma_wait_us", "rsx_fifo_yield" };
 
 /* Defaults. r2: every SPU optimisation is OFF by default, so with no tuning file the build behaves like
  * the known-good build (spu_insert_select 0, spu_narrow_ls_store 0, spu_hot_cpu -1). Keys 8/9
  * (spu_jit_verify, spu_narrow_ls_check) are debug aids and are OFF too. vk_event_spin_us = -1 (unbounded
  * spin); rsx_cpu / spu_hot_cpu = -1 (no pinning) is the historic default. */
-static const int64_t g_default[PS5_TUNE_COUNT] = { 4000, 100, -1, 100, -1, 0, 0, -1, 0, 0, 0 };
-static int64_t g_tune[PS5_TUNE_COUNT] = { 4000, 100, -1, 100, -1, 0, 0, -1, 0, 0, 0 };
+/* rsx_fifo_yield: 0 = historic shared yield wrapper; 1 = direct OS yield
+ * only while an unchanged FIFO self-jump word is being watched. */
+static const int64_t g_default[PS5_TUNE_COUNT] = { 4000, 100, -1, 100, -1, 0, 0, -1, 0, 0, 0, 0 };
+static int64_t g_tune[PS5_TUNE_COUNT] = { 4000, 100, -1, 100, -1, 0, 0, -1, 0, 0, 0, 0 };
 
 /* size ^ (mtime << 20) of the file last read; 0 means "no file seen" */
 static uint64_t g_file_key;
 static int g_describe_seq;
-static char g_describe[512] = "radv_spin_us=4000 radv_sleep_us=100 vk_event_spin_us=-1 vk_event_sleep_us=100 rsx_cpu=-1 spu_insert_select=0 spu_narrow_ls_store=0 spu_hot_cpu=-1 spu_jit_verify=0 spu_narrow_ls_check=0 rsx_dma_wait_us=0";
+static char g_describe[512] = "radv_spin_us=4000 radv_sleep_us=100 vk_event_spin_us=-1 vk_event_sleep_us=100 rsx_cpu=-1 spu_insert_select=0 spu_narrow_ls_store=0 spu_hot_cpu=-1 spu_jit_verify=0 spu_narrow_ls_check=0 rsx_dma_wait_us=0 rsx_fifo_yield=0";
 
 /* Relaxed atomic load, cheap enough to call once per wait. */
 int64_t rpcs3ps5_tune(int key)
@@ -77,6 +80,8 @@ int64_t rpcs3ps5_tune(int key)
 static int64_t tune_clamp(int key, int64_t v)
 {
 	switch (key) {
+	case PS5_TUNE_RSX_FIFO_YIELD:
+		return v == 1 ? 1 : 0;
 	case PS5_TUNE_RSX_DMA_WAIT_US:
 		return v < 0 ? 0 : (v > 2000 ? 2000 : v);
 	case PS5_TUNE_RADV_SPIN_US:
@@ -110,9 +115,9 @@ static void tune_set_describe(const int64_t *v, const char *unknown)
 {
 	snprintf(g_describe, sizeof g_describe,
 		"radv_spin_us=%lld radv_sleep_us=%lld vk_event_spin_us=%lld vk_event_sleep_us=%lld rsx_cpu=%lld "
-		"spu_insert_select=%lld spu_narrow_ls_store=%lld spu_hot_cpu=%lld spu_jit_verify=%lld spu_narrow_ls_check=%lld rsx_dma_wait_us=%lld%s%s",
+		"spu_insert_select=%lld spu_narrow_ls_store=%lld spu_hot_cpu=%lld spu_jit_verify=%lld spu_narrow_ls_check=%lld rsx_dma_wait_us=%lld rsx_fifo_yield=%lld%s%s",
 		(long long)v[0], (long long)v[1], (long long)v[2], (long long)v[3], (long long)v[4],
-		(long long)v[5], (long long)v[6], (long long)v[7], (long long)v[8], (long long)v[9], (long long)v[10],
+		(long long)v[5], (long long)v[6], (long long)v[7], (long long)v[8], (long long)v[9], (long long)v[10], (long long)v[11],
 		unknown && unknown[0] ? " unknown=" : "", unknown && unknown[0] ? unknown : "");
 	__atomic_fetch_add(&g_describe_seq, 1, __ATOMIC_RELAXED);
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarise patch 0060 PS5 SPU / RSX sampled CPU wall-time activity.
+"""Summarise PS5 SPU / RSX completed samples and patch0062 live SPU coverage.
 
 Counts and durations are partial, sampled intervals, not complete per-frame
 costs. SPU gateway is inclusive of helper/channel blocking. CPU-work samples
@@ -23,6 +23,8 @@ STAGES = {
 }
 ROW = re.compile(r"PS5 WORKER: group (spu|rsx) id 0x([0-9a-fA-F]+) kind (\d+) sample_n (\d+) avg_us ([\d.]+) max_us ([\d.]+) sampled_sum_us ([\d.]+)")
 LOSS = re.compile(r"PS5 WORKER2: lost_spu_slot_allocations (\d+)")
+COVER = re.compile(r"PS5 SPUCOVER: v2 id 0x([0-9a-fA-F]+) tasks (\d+) jit_tasks (\d+) gateway_entries (\d+) gateway_returns (\d+) gateway_active ([01]) gateway_age_us ([\d.]+) cpu_work_entries (\d+) cpu_work_sample_active ([01]) cpu_work_sample_age_us ([\d.]+) cpu_work_abandoned (\d+)")
+ZERO_ID = re.compile(r"PS5 SPUCOVER2: zero_id_registrations (\d+)")
 TIME = re.compile(r"\b(\d+):(\d{2}):(\d{2})\.(\d+)")
 OLD = ("PS5 PERF:", "PS5 FIFO2:", "PS5 CLOCK2:", "PS5 PROFILE ")
 
@@ -55,8 +57,11 @@ def analyse(stem):
     groups = defaultdict(lambda: defaultdict(list))
     found = 0
     lost = 0
+    coverage_rows = defaultdict(list)
+    zero_ids = 0
+    v2 = bool(COVER.search(text))
     for line in lines:
-        if "PS5 WORKER" not in line:
+        if "PS5 WORKER" not in line and "PS5 SPUCOVER" not in line:
             continue
         t = time_of(line)
         if not start <= t <= stop:
@@ -75,14 +80,27 @@ def analyse(stem):
             found += 1
         elif (match := LOSS.search(line)):
             lost += int(match.group(1))
-    if found == 0:
-        raise ValueError("No PS5 WORKER reports in FPS measurement window")
+        elif (match := COVER.search(line)):
+            fields = match.groups()
+            coverage_rows[int(fields[0], 16)].append({
+                "tasks": int(fields[1]), "jit_tasks": int(fields[2]),
+                "gateway_entries": int(fields[3]), "gateway_returns": int(fields[4]),
+                "gateway_active": bool(int(fields[5])), "gateway_age_us": float(fields[6]),
+                "cpu_work_entries": int(fields[7]), "cpu_work_sample_active": bool(int(fields[8])),
+                "cpu_work_sample_age_us": float(fields[9]), "cpu_work_abandoned": int(fields[10]),
+            })
+        elif (match := ZERO_ID.search(line)):
+            zero_ids += int(match.group(1))
+    if found == 0 and not coverage_rows:
+        raise ValueError("No PS5 WORKER or SPUCOVER reports in FPS measurement window")
     summaries = {"spu": {}, "rsx": {}}
     for group, entries in groups.items():
         for (worker, code), rows in sorted(entries.items()):
             samples = sum(x["samples"] for x in rows)
             total = sum(x["sum_us"] for x in rows)
             label, rate = STAGES[(group,code)]
+            if v2 and group == "spu" and code == 0:
+                rate = 1  # 0062 times every gateway, not every 256th return.
             stats = {
                 "sampled_calls": samples,
                 "sample_probability": f"1/{rate}",
@@ -103,8 +121,29 @@ def analyse(stem):
         for v in rsx.values():
             v["share_of_sampled_fifo_cpu_time_percent"] = round(
                 100*v["sampled_total_cpu_us"]/total_rsx,2)
+    coverage = {}
+    for worker, rows in sorted(coverage_rows.items()):
+        first, last = rows[0], rows[-1]
+        coverage[f"0x{worker:08x}"] = {
+            "reports": len(rows), "last": last,
+            "gateway_entries_delta_between_reports": last["gateway_entries"] - first["gateway_entries"],
+            "gateway_returns_delta_between_reports": last["gateway_returns"] - first["gateway_returns"],
+            "cpu_work_entries_delta_between_reports": last["cpu_work_entries"] - first["cpu_work_entries"],
+            "gateway_active_observations": sum(r["gateway_active"] for r in rows),
+            "max_gateway_age_us": max(r["gateway_age_us"] for r in rows),
+            "max_cpu_work_sample_age_us": max(r["cpu_work_sample_age_us"] for r in rows),
+        }
+    live_valid = any(r["last"]["gateway_entries"] or r["last"]["cpu_work_entries"]
+                     for r in coverage.values()) and not zero_ids and not lost
+    warning = None
+    if not summaries["spu"]:
+        warning = ("No completed SPU interval samples; live gateway/cpu_work coverage is available. "
+                   "Live age includes JIT/helpers/waits and is not productive CPU time."
+                   if live_valid else
+                   "No completed SPU samples or confirmed live execution coverage; do not infer idle SPUs")
     return {
         "capture": stem.name,
+        "capture_log_window_seconds": [start, stop],
         "fps_window_mean": m["mean_window_fps"],
         "fps_time_weighted": round(weighted,3),
         "new_spu_compilations": 0,
@@ -113,9 +152,11 @@ def analyse(stem):
         "worker_activity": summaries,
         "rsx_measurement_valid": bool(summaries["rsx"]),
         "spu_measurement_valid": bool(summaries["spu"]),
-        "spu_measurement_warning": (None if summaries["spu"] else
-            "No SPU samples emitted: SPU gateway/CPU-work timing coverage failed; "
-            "this does not imply idle SPU workers"),
+        "spu_completed_timing_valid": bool(summaries["spu"]),
+        "spu_live_coverage_valid": live_valid,
+        "spu_coverage": coverage,
+        "spu_zero_id_registrations": zero_ids,
+        "spu_measurement_warning": warning,
         "old_heavy_diagnostics_absent": all(z not in text for z in OLD),
         "frame_event_tracer_disabled": "PS5 FRAMEDEP:" not in text,
         "limitations": [
@@ -124,6 +165,8 @@ def analyse(stem):
             "RSX post-FIFO state reports are a classification of run_FIFO invocations, not GPU method counts",
             "RSX sampled CPU fraction excludes rendering/driver tasks outside run_FIFO, and can have sampling bias",
             "No Vulkan GPU completion timestamp, SPU guest-job duration or frame critical-path dependency graph",
+            "Coverage fields are cumulative/approximate snapshots; never sum live ages or cumulative counters across windows",
+            "CPU-work counts accepted pending-work calls, not all guest SPU instruction execution",
             "FPS comparison requires a same-scene profiler-off control with tracing disabled",
         ],
     }

@@ -1,4 +1,11 @@
 # GTA IV NPUB30702 — PS5 RPCS3 critical-path performance audit
+
+<!-- latest-state:start -->
+**Latest GTA IV PS5 patch0069 SPU reservation-page and producer diagnostic (2026-10-31): COMPLETE and SAFELY ROLLED BACK.** Two valid stationary outdoor 45s GTA IV NPUB30702 runs, Chiaki ON, MFC gate0/helper probes0, 150%/scheduler B/Mega SPU/XFloat Approximate/tuning0; FPS **28.77 and 26.78**, mean **27.775**, zero new SPU compilations. Across 23 complete ~4s windows, sampled 1/128 per worker/path **2,449 SPU waits**, **2,279 successful notifier transitions**, no table overflows. Of waits, **2,429 = 99.18%** on guest page **0x017F7000** (2,421 changed flag, 8 cleared reservation); 256 PPU-thread and 1,689 SPU-thread successful notifier samples hit this page. Other 20 wait samples were 0x017F8000. Notifier source is not necessarily the guest data writer or the cause of a particular wake. Raw FPS/wait-count correlation +0.663 across 4s windows; normalized by estimated displayed frames only +0.115. This strongly supports a coordination hotspot, **NOT a demonstrated frame bottleneck or FPS improvement**.
+
+**Console NOW:** original patch0064 **gate0 matched control RESTORED** after guarded rollback. Independent full ELF PT_LOAD/TLS and exact code mirror SHA256 **e48a5c75cc3357d7f51474d1ded457e4d27e221c15fde446023538d8f48eda7b** PASS. Complete independent PS5 process listing confirms both game and launcher **CLOSED**. Patch0069 preserved in .spuwake0069-stage (ELF117439088 bytes, mirror74612497 bytes), backup slot empty; older 0068/0067/0066/0065 and gate1 stage preserved. Patch manifest count69 refers to WSL source, **not installed PS5**. No game saves/config/caches changed. Full handoff: game research/GTA-IV-SPU-reservation-page-attribution-20261031.md and results/gta4-spu-wakeup-20261031/spuwake0069-outdoor-combined.json. Next: identify exact 128B reservation line and actual PPU/SPU data-writer callsites in 0x017F7000, not speculate on TLS or atomic timeouts.
+<!-- latest-state:end -->
+
 Date: 2026-10-30
 Status: **initial cross-subsystem source audit; root cause not yet proved.**
 No PS5 configuration, executable or game data changed by this audit.
@@ -1843,3 +1850,1142 @@ then test an isolated RSX FIFO polling/wake policy against
 the unmodified 0060 diagnostic as control, with matched
 FPS and correctness checks. Any code changes should
 preserve guest state and not infer GPU completion time.
+
+
+## 2026-10-30 - Patch0061 watched self-jump OS-yield experiment READY LOCALLY
+
+User selected the FIFO self-jump/wake-policy experiment. Implemented an
+opt-in `rsx_fifo_yield` key (ABI key 11): 0/default keeps the shared
+PS5 yield wrapper, 1 directly calls `scePthreadYield` only for an active
+unchanged self-jump watch with no pending arguments. True-empty queues,
+FIFO ordering, guest state and existing outer-loop handling are preserved.
+Potential producer progress benefit versus RSX wake-latency cost remains
+unmeasured. This is not a claimed FPS gain.
+
+Durable core patch: `port/rpcs3-latest-patches/0061-PS5-opt-in-self-jump-OS-yield.patch`;
+selected manifest now 61 patches. Actual source is Ubuntu-24.04
+`/home/callum/work/rpcs3-latest`; Windows emulator checkout untouched.
+
+Host dispatch/watch/parser/rollback checks, existing DMA wait and worker
+counter checks, and exact 0060-to-0061 patch replay PASS. Full latest-profile
+build PASS, native TLS verified and all nine package gates PASS.
+
+Full experiment design, artifact hashes and validation are in
+`game research/GTA-IV-FIFO-yield-experiment-20261030.md`; local machine-readable
+build record is `results/gta4-fifo-yield-20261030/build.json`.
+Signed title and mirror are local only. Installer
+`tools/deploy-gta4-rsx0061.py` verifies hashes and console process state,
+uses isolated stage/backup names and preserves the 0060 rollback pair.
+`tools/gta4-fifo-yield.py` prepares reversible mode variants and restores
+the exact original tuning file/absence. Original console tuning was absent.
+
+Latest read-only console status: live file sizes still match patch0060;
+no 0061 stage or backup. User closure confirmation is pending. Do not
+modify console executables or tuning while GTA IV/KB-RPCS3 are running.
+After closure: install 0061 in mode 0, capture warmed same-scene controls,
+then mode 1 and return mode 0 with two 45-second captures each (A/B/A).
+Keep B scheduler / Mega / Approximate / 150% / 100% clocks and SPU flags
+OFF. Reject compilation-heavy windows, validate gameplay and do not
+attribute cross-scene variation or lower CPU occupancy to an FPS win.
+
+
+### Patch0061 installed and verified after user closure confirmation
+
+User replied **Both are closed**. Stage and activation process checks
+confirmed no title/launcher. Both staged and installed pairs passed
+decrypted-ELF load/TLS verification and exact mirror SHA256 readback.
+Live 0061 ELF/mirror: 117429696 / 74604561 bytes; previous 0060 pair
+is retained as `*.before-rsx0061-20261030` (117429696 / 74604305).
+No game config, saves, caches or other backups changed. Initial mode
+is 0/control; original tuning file was absent. Build record now marks
+console_deployed=true. No 0061 gameplay/FPS captures yet.
+
+NEXT USER ACTION: launch same warmed outdoor scene/camera and say
+`FIFO control ready`. Capture two 45s controls with rsx_fifo_yield=0
+and the unchanged B/Mega/150%/SPU-flags-off expectations, then close
+title before applying mode1 via `tools/gta4-fifo-yield.py os-yield`.
+See dedicated experiment document for A/B/A and rollback instructions.
+
+
+## Patch0061 initial control captures and candidate enabled - 2026-10-30
+
+User said `FIFO control ready`. Captured two independent 45-second
+windows at the stationary outdoor scene, runtime-confirmed scheduler B /
+Mega / Approximate / 150% / 100% clocks / 60 FPS cap, SPU experiments OFF
+and `rsx_fifo_yield=0`. Both valid, 11 FPS windows each, no new SPU compilation.
+
+| Metric | Control run 1 | Control run 2 |
+| --- | ---: | ---: |
+| Window mean FPS | 26.69 | 25.83 |
+| Timestamp-weighted FPS | 26.691 | 25.827 |
+| Mean window p50 interval ms | 37.45 | 38.77 |
+| Mean window p95 interval ms | 41.91 | 42.36 |
+| Mean window p99 interval ms | 44.47 | 43.86 |
+| Mean window 1% low FPS | 22.75 | 22.85 |
+| Sampled FIFO wall time classified spinning | 11.20% | 12.44% |
+
+Two-run mean: **26.26 FPS** (timestamp-weighted run-mean 26.259).
+Window percentiles are not pooled frame percentiles. FIFO fractions are
+sampled run_FIFO CPU wall time, not frame latency or full RSX duty cycle.
+RSX worker measurements valid, no slot overflow, old heavy diagnostic and
+frame-event markers absent. SPU measurements remain uncovered (zero samples);
+do not interpret as idle SPUs. No candidate FPS measurement yet.
+
+Raw captures and parsed worker reports:
+`results/gta4-fifo-yield-20261030/B-fifo0061-control-run{1,2}.{json,log}`
+and corresponding `-worker-activity.json`; combined result:
+`results/gta4-fifo-yield-20261030/control-0061-combined.json`.
+
+After captures, user explicitly confirmed **Both are closed**. The tuning
+helper independently verified no title/launcher process, applied
+`rsx_fifo_yield 1`, and verified exact readback. Independent status confirmed
+17 bytes, SHA256
+`b3679ae800aa0e1555aec2cc0cc65e65e855316d0b25ee71b0157e3b8a9737c2`.
+Only the tuning file changed; same patch0061 executable/mirror. Existing
+other settings and backups untouched. Original absent tuning state is
+saved locally for restore.
+
+**NEXT USER ACTION:** launch the same save/stationary outdoor camera, let
+compilation settle, reply `FIFO candidate ready`. Capture two 45-second
+runs named `fifo0061-os-yield-run1`, `run2` with the same settings checks
+and `--expected-tuning rsx_fifo_yield=1`; reject any SPU compilations.
+Compare to the above control, then close game/title before switching back
+with `tools/gta4-fifo-yield.py control` for two return controls. Do not
+claim an improvement or discard a possible regression before the switchback.
+
+
+## Patch0061 direct OS-yield candidate measured; original tuning restored - 2026-10-30
+
+User said `FIFO candidate ready`. Two separate 45-second candidate captures
+passed all runtime checks (B scheduler, Mega, Approximate, 150%, 100% clocks,
+60 FPS cap, SPU experiments OFF, rsx_fifo_yield=1). Both recorded zero new
+SPU compilations and 12 FPS windows. No console writes during capture.
+
+| Metric | Initial control 1 | Initial control 2 | Candidate 1 | Candidate 2 |
+| --- | ---: | ---: | ---: | ---: |
+| Mean window FPS | 26.69 | 25.83 | 26.69 | 25.11 |
+| Timestamp-weighted FPS | 26.691 | 25.827 | 26.692 | 25.108 |
+| Mean window p50 ms | 37.45 | 38.77 | 37.45 | 39.93 |
+| Mean window p95 ms | 41.91 | 42.36 | 41.40 | 43.60 |
+| Mean window p99 ms | 44.47 | 43.86 | 43.32 | 45.98 |
+| Mean window 1% low FPS | 22.75 | 22.85 | 23.18 | 21.86 |
+
+Initial control timestamp-weighted run mean **26.259 FPS**, candidate
+**25.900 FPS**: observed **-0.359 FPS (-1.37%)**. Candidate mean p95
+42.500 vs 42.135 ms, p99 44.650 vs 44.165 ms, 1% low 22.52 vs 22.80 FPS.
+These are means of watchdog-window summaries, not pooled frame percentiles.
+**No demonstrated performance improvement.** The small observed slowdown is
+within the prior scene/run variation; return controls are needed to separate
+policy effect from scene drift. Do not promote mode 1 based on these results.
+
+Candidate sampled FIFO post-state shares (run1/run2): running 83.10/79.95%,
+spinning 12.18/15.64%, NOP 4.60/4.39%, empty 0.13/0.02%. Sampled spinning
+invocation means 3.397/3.635 us vs control 3.610/3.962 us. These are sampled
+run_FIFO CPU wall times, not full thread duty cycle, frame latency or direct
+OS wake latency. There is no per-policy yield call counter. Both candidate
+worker parses have valid RSX coverage, zero allocation overflow, old heavy
+profiler absent and frame tracer disabled. SPU samples remain absent; do not
+infer idle SPUs or optimise uncovered helper paths from this result.
+
+Raw candidate captures/worker parses:
+`results/gta4-fifo-yield-20261030/B-fifo0061-os-yield-run{1,2}.{json,log}`
+and corresponding `-worker-activity.json`. Combined verified result:
+`results/gta4-fifo-yield-20261030/candidate-0061-combined.json`.
+
+User then explicitly confirmed **Both are closed** for restoring the
+original policy. `tools/gta4-fifo-yield.py restore` independently checked
+no title/launcher process and restored the exact original **absence** of
+ps5-tuning.txt. Independent status confirmed absent/all defaults, hence
+rsx_fifo_yield=0. Patch0061 executable/mirror and all backups unchanged.
+No game configs, saves, game data or caches modified.
+
+The workspace `AGENTS.md` now requires reading the latest game research
+before new work, recording each meaningful investigation/benchmark/failed
+experiment before handoff, keeping current state and the exact next action,
+and justifying repeats using changed conditions or required controls.
+This return-control phase is the planned A/B/A crossover, not a rerun of
+an abandoned optimisation.
+
+**NEXT USER ACTION:** launch the same warmed stationary outdoor scene/camera
+and reply `FIFO return control ready`. Capture two 45s runs named
+`fifo0061-return-control-run1`, `run2`, expecting rsx_fifo_yield=0 and all
+other original settings. Reject SPU compilation, compare A/B/A, and record
+the conclusion before proposing another optimisation. Original tuning is
+already restored; no further tuning cleanup needed after those captures.
+
+
+## Patch0061 A/B/A complete - direct OS yielding shows no useful FPS gain (2026-10-30)
+
+User said `FIFO return control ready`. Captured two more independent 45s
+stationary outdoor windows with original absent tuning file (mode 0).
+Both passed scheduler B / Mega / Approximate / 150% / 100% clocks / 60 cap /
+SPU-experiments-OFF checks, 11 FPS windows each, zero new SPU compilations.
+No console file writes during these measurements.
+
+| Metric | Initial A1 | Initial A2 | Candidate B1 | Candidate B2 | Return A1 | Return A2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Mean window FPS | 26.69 | 25.83 | 26.69 | 25.11 | 26.03 | 25.35 |
+| Timestamp-weighted FPS | 26.691 | 25.827 | 26.692 | 25.108 | 26.027 | 25.345 |
+| Mean window p95 ms | 41.91 | 42.36 | 41.40 | 43.60 | 42.35 | 44.02 |
+| Mean window p99 ms | 44.47 | 43.86 | 43.32 | 45.98 | 44.80 | 48.07 |
+| Mean window 1% low FPS | 22.75 | 22.85 | 23.18 | 21.86 | 22.50 | 21.29 |
+
+Timestamp-weighted phase means: initial A **26.259**, candidate B **25.900**,
+return A **25.686 FPS**. The candidate falls between the two controls.
+All four A runs average **25.9725 FPS**, candidate difference **-0.0725 FPS
+(-0.28%)**. This descriptive difference does not establish a causal slowdown.
+Initial-to-return drift (0.573 FPS) and within-phase variation are larger.
+Window percentiles above are means of summaries, not pooled frame percentiles.
+
+**Decision: no demonstrated useful framerate gain; retain the original
+policy and stop this direct-OS-yield candidate.** No more repeats of the same
+policy/scene/build are justified without new evidence or a materially changed
+hypothesis. Do not claim a speedup from lower sampled spin duration, CPU load,
+or a better tail in one run. No comprehensive candidate gameplay correctness
+assessment was supplied; there is no reason to adopt it from these FPS data.
+
+Return sampled FIFO spinning shares: 13.68% / 15.44% (initial 11.20/12.44%,
+candidate 12.18/15.64%). These are sampled run_FIFO CPU wall time only.
+All six worker parses have valid RSX samples, zero slot-allocation overflow,
+old heavy profiler absent and old frame-event tracer disabled. SPU coverage
+is still missing; this is not evidence of idle SPUs or a measured helper cost.
+
+New raw files:
+`results/gta4-fifo-yield-20261030/B-fifo0061-return-control-run{1,2}.{json,log}`
+and matching `-worker-activity.json`. Full six-run validated comparison:
+`results/gta4-fifo-yield-20261030/fifo0061-aba-comparison.json`.
+The build record now marks experiment_complete=true.
+
+**Current console:** patch0061 installed, `rsx_fifo_yield=0`, original tuning
+file absence already restored. Game/title running at the end of capture;
+user may move the camera now. No further cleanup or console changes needed.
+Exact patch0060 executable/mirror rollback remains preserved as
+`*.before-rsx0061-20261030`; rollback only with game/title stopped. Do not
+replace executables or change tuning while the title is running.
+
+**Next engineering focus:** repair the missing SPU gateway/helper timing
+coverage with low-overhead entry/return or safe event-boundary observation,
+then select a measured hot path. Do not blindly change helper semantics or
+repeat this FIFO direct-yield experiment. This is a proposed next investigation,
+not work performed or an FPS gain promised by the completed experiment.
+
+
+## Patch0062 SPU coverage repair built locally - 2026-10-30
+
+User requested fixing missing SPU timing coverage. Confirmed source defect:
+old gateway probe skips first 255 calls, records only after return, and
+watchdog hides registered slots with no completed samples. This can miss a
+long-lived first gateway entirely; exact console explanation remains to be
+verified with new entry/return/live data. cpu_work is a specific pending-work
+path, not all SPU execution. No idle-SPU conclusion follows from missing data.
+
+Implemented patch0062 with cumulative task/JIT/gateway/cpu_work counts,
+active gateway/helper sample age, first/all-gateway timing, first/1024th
+cpu_work samples independent of the emulator iteration counter, registration
+failure reporting and explicit abandonment cleanup at gateway return.
+g_escape restores the stack without C++ unwinding: no destructor timer is
+relied on across that boundary. RSX sampling, guest execution, JIT codegen,
+synchronisation, scheduling and default FIFO policy unchanged.
+
+Host two-translation-unit live/first/completion/escape tests PASS; parser
+synthetic tests PASS; regression parsing of all six 0061 FIFO captures retains
+exact FPS and worker timing data. Isolated patch replay reproduces the three
+actual WSL build source files; full PS5 build, native TLS and all nine package
+gates PASS. Single linked shared SPU slot array verified. Diagnostic overhead
+and live console coverage still need testing; no FPS gain claimed.
+
+Research: `game research/GTA-IV-SPU-coverage-20261030.md`.
+Core patch: `port/rpcs3-latest-patches/0062-PS5-report-live-SPU-gateway-coverage.patch`.
+Parser: `tools/gta4-worker-activity.py`. Selected manifest now 62 patches.
+Exact build hashes/local artifacts and validation:
+`results/gta4-spu-coverage-20261030/build.json`.
+Actual build source: Ubuntu-24.04 `/home/callum/work/rpcs3-latest` as callum;
+Windows emulator checkout untouched. Earlier edits preserved.
+
+Console read-only status still matches 0061 (117429696/74604561 bytes),
+no 0062 stage or backup. Hash-pinned paired installer
+`tools/deploy-gta4-rsx0062.py` is ready. Exact local 0061 signed/converted/mirror
+control archived before rebuild. All older console backups preserved.
+User closure confirmation pending for installing this new pair. Do not stage
+or replace while title running. After closure and process checks: install,
+then user boots same warmed 150%/B/Mega scene; capture two 45-second
+spu-cover0062 runs with original tuning defaults and zero SPU compilation.
+Distinguish live coverage from completed intervals and record findings before
+selecting a SPU optimisation. Do not repeat failed FIFO direct-yield candidate.
+
+
+## Patch0062 installed and verified after user closure confirmation - 2026-10-30
+
+User explicitly replied **Both are closed** for GTA IV and KB-RPCS3.
+`tools/deploy-gta4-rsx0062.py stage`, independent status, then `activate`
+completed successfully. Process checks passed before staging, on activation
+entry and immediately before renames. Both staged and installed readbacks
+matched the local converted ELF load/TLS segment bytes and exact code-mirror
+SHA256. Signed SELF was not incorrectly hash-compared to FTP's decrypted ELF.
+
+Independent post-activation status:
+- Live patch0062 decrypted ELF: **117434056 bytes**.
+- Live mirror: **74605073 bytes**, SHA256
+  `5430f413e0574d082fa71add8e6b40dcf2a1a6bf714212f77469e5883d8a0d60`.
+- Stage empty; exact prior 0061 pair retained as
+  `*.before-rsx0062-20261030` (**117429696 / 74604561 bytes**).
+- Original tuning file remains **absent**, independently verified: FIFO
+  mode 0, SPU experiments OFF. No game configs, saves, caches or game data
+  modified. Older backup chains preserved.
+
+Machine-readable build record now marks console_deployed=true with
+verification and rollback state. Runtime coverage remains **unverified**:
+no patch0062 game launch/capture has yet been recorded. No FPS gain claimed.
+
+**NEXT USER ACTION:** launch GTA IV, same stationary outdoor camera/save,
+allow compilation to settle, and reply `SPU coverage ready`. Capture two
+45s runs with unique labels `spu-cover0062-run1`, `run2`, using scheduler B,
+150% and expected tuning rsx_fifo_yield=0, spu_insert_select=0,
+spu_narrow_ls_store=0, spu_narrow_ls_check=0. Reject new SPU compilations.
+Parse via `tools/gta4-worker-activity.py`; distinguish completed intervals
+from SPUCOVER live entry/age snapshots, inspect entry/return counts,
+cpu_work visits, abandoned samples, zero IDs, allocation overflow and FPS.
+Record whether actual live data supports the long-lived gateway hypothesis
+before selecting any SPU optimisation. Do not interpret inclusive age as
+productive CPU time or repeat the completed FIFO direct-yield experiment.
+
+Rollback only after closing game/title and passing process checks:
+`python3 tools/deploy-gta4-rsx0062.py rollback` restores the paired 0061
+backup and retains 0062 as stage. No rollback is requested now.
+
+
+## Patch0062 on-console SPU coverage VERIFIED - two GTA IV captures (2026-10-30)
+
+User said `SPU coverage ready`. Two independent 45-second captures passed
+all expected runtime checks: B scheduler / Mega / Approximate / 150% /
+100% clocks / 60 cap, rsx_fifo_yield=0 and all three SPU experiments OFF.
+Zero new SPU compilations in both, no console writes during measurement.
+
+| Metric | Run 1 | Run 2 |
+| --- | ---: | ---: |
+| Mean FPS reporting windows | 25.86 | 26.55 |
+| Timestamp-weighted FPS | 25.858 | 26.555 |
+| Mean window p50 interval ms | 38.52 | 37.56 |
+| Mean window p95 interval ms | 43.44 | 41.45 |
+| Mean window p99 interval ms | 45.08 | 43.07 |
+| Mean window 1% low FPS | 22.24 | 23.27 |
+| New SPU compilations | 0 | 0 |
+| Registered SPUs with live gateway coverage | **6** | **6** |
+| Accepted cpu_work entries, all six | **0** | **0** |
+| Zero-ID registration / allocation overflow | 0 / 0 | 0 / 0 |
+
+Weighted run-mean **26.2065 FPS**. These are means of watchdog-window
+summaries, not pooled frame percentiles. This measurement-only build is
+not a demonstrated speedup; the run differences do not quantify its overhead.
+Old heavy diagnostics and frame tracer are absent; RSX samples remain valid.
+
+**Coverage fix is verified on console.** All six SPUs report one active
+native gateway at each observed watchdog report. At the end of run2:
+
+| Guest ID | Gateway entries / returns since task start | Current live gateway age s | Accepted cpu_work entries |
+| --- | ---: | ---: | ---: |
+| 0x00000100 | 51 / 50 | 40.301 | 0 |
+| 0x00000200 | 5 / 4 | 181.277 | 0 |
+| 0x01000100 | 46 / 45 | 43.295 | 0 |
+| 0x02000100 | 12 / 11 | 110.907 | 0 |
+| 0x03000100 | 9 / 8 | 126.899 | 0 |
+| 0x04000100 | 4 / 3 | 147.155 | 0 |
+
+Every total is below the old first sample at call 256. The live calls span
+many frames/capture boundaries. This supports the diagnosed gateway
+sampling blind spot; the earlier missing data did not mean idle SPUs.
+`cpu_work()` has zero accepted visits for this session, so repeatedly
+sampling that pending-work path cannot explain this workload's guest work.
+This is evidence about the instrumented path, not a claim that no SPU
+DMA/channel helper executes elsewhere inside the gateway.
+
+Completed gateway samples also appear: run1 emits one ~1.594540 s interval
+for ID 0x00000100; run2 emits ~64.530915 s for 0x00000100 and ~65.148844 s
+for 0x01000100. **These durations span time before the capture in which
+completion is reported.** Do not sum/divide them as the capture's CPU duty
+cycle or per-frame cost. Per-ID entry/return deltas cover report-to-report
+boundaries, not the exact start/end of the 45-second capture; this explains
+why a completed counter drain and first snapshot need not share that delta.
+Live ages are inclusive wall time: guest JIT, nested helpers, waits and
+OS descheduling remain unresolved. Active gateway snapshots are not proof
+of continuous useful CPU execution or the frame-critical bottleneck.
+
+Raw evidence:
+- `results/gta4-spu-coverage-20261030/B-spu-cover0062-run{1,2}.{json,log}`.
+- Corresponding `-worker-activity.json` and `run{1,2}-parser.txt`.
+- Full validated aggregate:
+  `results/gta4-spu-coverage-20261030/spu-coverage-0062-combined.json`.
+- Build record now marks console_runtime_verified=true and coverage_fix_verified=true.
+
+**Current state:** patch0062 running, exact original absent tuning file
+unchanged, FIFO mode0/SPU experiments OFF, 0061 paired rollback retained as
+`*.before-rsx0062-20261030`. Older backups preserved. User may move the camera
+now; no cleanup or extra capture is required for this coverage-fix task.
+Do not modify binaries/tuning while the title is running.
+
+**Next measured investigation, not yet implemented:** observe actual LLVM
+JIT-to-channel/MFC helper boundaries (for example exec_rdch and exec_mfc_cmd)
+to distinguish nested helper/wait occupancy from guest JIT execution before
+selecting an optimisation. Use low-overhead explicit boundaries compatible
+with g_escape, not per-instruction timing or another blind cpu_work probe.
+Do not repeat the completed FIFO direct-yield candidate or this coverage
+validation without new evidence. No FPS improvement is claimed here.
+
+
+## Patch0063 native SPU helper boundary diagnostics ready locally - 2026-10-30
+
+Following verified six-gateway coverage/zero cpu_work visits, source review
+located ten actual native LLVM channel/MFC/event/STOP helpers, including
+wait_on_spu_channel that bypasses exec_rdch. Added entry/return/escape counts,
+sparse live kind/argument/age snapshots, and first/1024 normal versus escaped
+duration samples. Explicit gateway cleanup handles g_escape without relying
+on C++ unwinding; nested measured helpers are suppressed/counted.
+Outside measured helpers is unresolved, not a pure guest JIT classification.
+No guest IR, channel/MFC semantics, scheduler or default FIFO changes.
+
+Actual ten helper bodies tested with probes ON/OFF, original state/returns,
+real longjmp cleanup, sampling and nesting PASS. Helper/coverage parsers,
+eight legacy captures, isolated patch replay and full PS5 build/TLS/all nine
+package checks PASS. Diagnostic overhead and on-console helper activity
+remain unmeasured. Selected manifest now 63 patches; previous work preserved.
+
+Research: `game research/GTA-IV-SPU-helper-boundaries-20261030.md`.
+Core patch: `port/rpcs3-latest-patches/0063-PS5-observe-SPU-LLVM-helper-boundaries.patch`.
+Tools: `tools/gta4-spu-helpers.py`, `tools/deploy-gta4-rsx0063.py`.
+Hashes/control archive/validation: `results/gta4-spu-helpers-20261030/build.json`.
+Console read-only sizes remain0062; no0063 stage/backup. User closure pending.
+Next: after closure/process checks install, launch same scene, reply
+SPU helper ready, then capture two 45s runs expecting tuning0. Parse helper
+and worker records; document observations before optimising. No speedup claim.
+
+
+## Patch0063 installed and readback-verified - 2026-10-30
+
+User explicitly confirmed **Both are closed** for GTA IV and KB-RPCS3.
+Paired installer stage and activate completed with independent status between
+them. Process checks passed before staging, at activation entry and immediately
+before renames. Both staged and installed pairs verified decrypted-ELF load/TLS
+segment bytes against the local converted ELF plus exact code-mirror SHA256.
+
+Independent final status: live ELF **117434488 bytes**, mirror **74611793
+bytes** (SHA256 `8ef00a6f9a4cece63e4de693c667b7921ac2fa5325b46758307f09ade63b8fca`),
+stage empty, previous 0062 pair preserved as `*.before-rsx0063-20261030`
+(**117434056 / 74605073 bytes**). Older backup chains intact. Original tuning
+file still **absent**, independently verified: FIFO0/SPU experiments OFF.
+No game configs, saves, caches or game files changed.
+
+Machine build record now marks console_deployed=true with verification and
+rollback state. **No gameplay/runtime helper capture yet; no FPS gain claim.**
+
+**NEXT USER ACTION:** launch GTA IV, return to same stationary outdoor save/
+camera, allow compilation to settle and reply `SPU helper ready`. Capture two
+45s runs named `spu-helpers0063-run1`, `run2` in
+`results/gta4-spu-helpers-20261030`, scheduler B, resolution150, expecting
+rsx_fifo_yield=0, spu_insert_select=0, spu_narrow_ls_store=0,
+spu_narrow_ls_check=0. Reject new SPU compilations. Run both
+`tools/gta4-worker-activity.py` and `tools/gta4-spu-helpers.py` on each stem.
+Check helper reporting presence, actual entry deltas, active kind/argument,
+normal versus escaped sampled durations, nested suppression, unstable
+observations, registration errors and FPS. Outside measured helpers is
+unresolved, not proof of pure guest JIT; point counts are not time fractions.
+Record results before choosing an optimisation or another diagnostic change.
+
+Rollback after closing title/process checks only:
+`python3 tools/deploy-gta4-rsx0063.py rollback` restores the exact 0062 pair
+and retains 0063 as stage. No rollback requested now.
+
+
+## Patch0063 helper findings captured; lighter0062 restored - 2026-10-30
+
+User said `SPU helper ready`. Two independent 45s captures passed B/Mega/
+Approximate/150%/100%-clocks/60-cap checks with FIFO0 and SPU experiments OFF.
+Zero new SPU compilations, six live SPUs/helper reports, no registration errors,
+no nested suppression or unstable snapshots. Older heavy profiler and frame
+tracer absent. No console writes during either measurement.
+
+| Metric | Run1 | Run2 |
+| --- | ---: | ---: |
+| Mean window FPS | 23.40 | 23.18 |
+| Timestamp-weighted FPS | 23.400 | 23.182 |
+| Mean window p95 ms | 48.24 | 47.56 |
+| Mean window p99 ms | 51.34 | 50.26 |
+| Mean window 1% low FPS | 19.51 | 19.93 |
+| Direct native mfc_cmd entry delta, all six SPUs | 97459370 | 98180880 |
+| wrch entry delta, all six SPUs | 38633290 | 38526586 |
+| rdch entry delta, all six SPUs | 734631 | 783033 |
+
+Helper report-to-report spans are ~44.362s (not exactly the nominal45s).
+These direct native MFC entries amount to ~2.20/2.21 million per second,
+plus ~0.87 million wrch calls/s. wrch can itself invoke process_mfc_cmd;
+these counts do not represent a complete per-command histogram of all MFC
+work. Only rdch/wrch/mfc_cmd had counter rows; do not infer other host paths
+are absent from the gateway or classify outside-helper work as pure JIT.
+
+Sampled normal MFC duration means (microseconds, includes probe/wait/descheduling):
+
+| Guest ID | Run1 | Run2 |
+| --- | ---: | ---: |
+| 0x00000100 | 0.287 | 0.279 |
+| 0x00000200 | 0.211 | 0.205 |
+| 0x01000100 | 0.280 | 0.282 |
+| 0x02000100 | 0.251 | 0.246 |
+| 0x03000100 | 0.225 | 0.227 |
+| **0x04000100** | **1.683** | **1.536** |
+
+This consistent outlier makes MFC command handling on 0x04000100 the next
+specific source-audit target. It is not proof that this SPU is the serial
+frame bottleneck: command mix, memory contention and scheduling may differ.
+No helper escape intervals occurred in these windows; escape cleanup is
+host-tested, not exercised by these gameplay samples.
+
+Stable live observations: run1 outside=56, rdch=6, mfc_cmd=10; run2
+outside=57, rdch=4, wrch=3, mfc_cmd=8, out of72 observations each.
+These are sparse point counts, **not CPU time fractions**. All active rdch
+snapshots had ch0 = SPU_RdEventStat. Sampled rdch means ranged ~14-322us,
+consistent with potential waits but not productive CPU cost attribution.
+Active MFC arguments were 0xD0 GETLLAR (7/5 observations), 0xB4 PUTLLC
+(2/2), 0xB0 PUTLLUC (0/1), and 0x20 PUT (1/0). Active wrch snapshots were
+channel21 MFC_Cmd (0/3). Constants checked in Cell/MFC.h and SPUThread.h.
+This is **not** a command-frequency histogram; do not assume those atomic
+commands dominate all entries from a handful of watchdog observations.
+
+**Diagnostic overhead concern / decision:** 0063 weighted run mean
+**23.291 FPS**, earlier0062 mean **26.2065 FPS**, observed -2.9155 FPS
+(~-11.13%). Different launches, game-world/scene drift and no controlled
+switchback mean this is not a proven causal overhead percentage. However,
+millions of entry atomics/TSC reads per second are a concrete instrumentation
+cost. Do not leave these probes in ordinary performance builds or claim that
+sub-microsecond sample means are uninstrumented helper costs. Cumulative
+counter rows and sampled wall intervals must not be summed as frame time.
+
+User explicitly confirmed **Both are closed** after captures to restore
+lighter0062. Installer checked actual processes and rollback succeeded.
+Both live files were independently downloaded and verified against archived
+0062 hashes/load/TLS segments (not SELF-vs-decrypted-ELF hash confusion).
+Final status: live0062 ELF117434056/mirror74605073; 0063 pair preserved under
+`*.rsx0063-stage` (117434488/74611793), backup suffix now empty. Original
+ps5-tuning.txt remains absent, independently verified. Older backups/configs/
+saves/caches/game files preserved. No further user action needed for this
+measurement task; normal gameplay can use the restored lighter build.
+
+Evidence:
+- `results/gta4-spu-helpers-20261030/B-spu-helpers0063-run{1,2}.{json,log}`.
+- Matching `-worker-activity.json`, `-spu-helpers.json` and parser text files.
+- Full combined/validated counts and rates:
+  `results/gta4-spu-helpers-20261030/spu-helpers-0063-combined.json`.
+- Independent rollback proof:
+  `results/gta4-spu-helpers-20261030/rollback-verification/verified.json`.
+
+**Next specific work:** audit SPUThread.cpp process_mfc_cmd, especially
+GETLLAR/PUTLLC/PUTLLUC reservation handling and its scheduler watchdog, using
+0x04000100's outlier as the lead. Preserve guest synchronization and ordering;
+command mix is unresolved. Prefer a source-backed, semantic-preserving
+candidate over another broad instrumentation pass. Any performance candidate
+must compile out/remove0063 helper probes and compare to exact0062 control.
+Local source/manifest still includes patch0063; console is restored0062.
+Do not accidentally rebuild/deploy the full helper probes as a release
+optimisation. Do not repeat completed FIFO, gateway-coverage or broad helper
+captures without changed evidence or a justified control. No FPS gain claimed.
+
+
+## MFC reservation source audit complete - 2026-10-30
+
+User requested a correctness-preserving optimisation audit. No production
+emulator/config/build/console changes made in this task. Source tracing ruled
+out scheduler acquire/release work under measured Preferred SPU Threads=0
+and RSX reservation locking under Accurate RSX reservation access=false.
+Both options are dynamic: do not hardcode/cross-call-cache the measured values.
+
+Recommended narrow candidate is PS5-only gating of reporting-only perf_meter
+entry construction in do_putllc and do_putlluc when perf_report is off.
+Exact0062 ELF has unconditional entry RDTSC in both functions; their timer
+uses are reporting-only. Actual perf_meter host harness verifies disabled
+reads eliminated and fixed-enabled sample behavior retained. Dynamic mid-call
+enable skips the in-flight candidate meter event; tested/documented rather
+than claiming exact diagnostic equivalence. Isolated diff applies cleanly;
+no guest statements outside constructor blocks differ in proposed fixture.
+No candidate PS5 build/performance result or full reservation equivalence proof.
+
+GETLLAR timestamps drive functional retry/spin policy and remain untouched.
+Repeated data/version checks, accurate locks, faults, LR events and notifier
+wakes must remain. Moving scan16_rdata is deferred pending local-store race/
+lock-order proof. Complete decisions, caveats and next step:
+`game research/GTA-IV-MFC-reservation-audit-20261030.md`.
+Host test: `port/tests/check-ps5-mfc-meter-audit.py`.
+Audit/candidate/disassembly/proof:
+`results/gta4-mfc-audit-20261030/` (audit-summary.json,
+candidate-reporting-meter-gate.diff, baseline-putll-disassembly.txt,
+meter-host-proof.txt). Do not treat the fixture diff as an applied port patch.
+
+Next if proceeding: implement the two-site PS5 gate, compile out0063 helper
+probes in matched baseline/candidate, focused correctness/build/assembly checks,
+then controlled PS5 A/B/A. No FPS prediction: per-command frequencies remain
+unknown and a single timestamp saving does not explain the0x04000100 outlier.
+Console remains last verified lighter0062; no new process-state check or
+console writes were needed for this audit. Local manifest still63. Record
+and stop a failed candidate instead of repeating broad instrumentation.
+
+
+## Patch0064 MFC meter gate implemented; two matched builds ready - 2026-10-30
+
+User authorised implementation/testing. Two-site PS5 reporting-only meter gate
+implemented with compile-time control0/candidate1. GETLLAR and guest protocol
+text unchanged. Full-rate0063 helper probes/logs default compiled OFF in both;
+existing0062 worker/RSX measurements shared. No runtime knob lookup added.
+Actual constructor blocks tested across control/candidate/nonPS5 with named
+report events; native helper semantics and OFF no-probe-cost proof PASS.
+Capture tool verifies boot mode, reportingOFF and absence of helper output.
+
+Both full PS5 builds/TLS/all9 package checks/mirror-segment hashes PASS.
+Control unconditionally executes entry RDTSC; actual candidate assembly branches
+past it when reportingOFF in BOTH functions. Patch replay reproduces sources.
+Immutable variant archives and exact hashes: results/gta4-mfc-meter-20261030/builds.json.
+Installer tools/deploy-gta4-mfc0064.py has separate control/candidate backup names.
+Research/test plan: game research/GTA-IV-MFC-meter-experiment-20261030.md.
+
+No console deployment/performance result yet. Read-only sizes still0062;
+original settings/tuning/saves/caches unchanged. Fresh closure pending, then
+install CONTROL, user boots reference scene and says MFC control ready.
+Take2x45s A, then candidate B and return A after safe swaps. No FPS gain claimed.
+
+
+## Matched0064 CONTROL installed and verified - 2026-10-30
+
+User confirmed **Both are closed**. Stage/activation process checks found no
+GTA IV/launcher. Full staged/preactivation and installed readbacks verified
+control ELF load/TLS segment bytes and exact mirror SHA256. Final independent
+status: liveELF117434056/mirror74605201, stage empty; exact prior0062 pair
+retained as `*.before-mfc0064-control-20261030` (117434056/74605073).
+Original tuning file absence independently verified. No CPU/game settings,
+saves, caches or game files changed. Older backups/0063 stage preserved.
+
+One staging anomaly was handled without activating a partial pair: the first
+control executable stage disappeared after a successful readback, while live
+0062 remained intact. LIST and repeated SIZE confirmed it missing. After a
+fresh process check, reuploaded only that missing hash-pinned file, verified
+load/TLS bytes, confirmed it present before/after readback and in independent
+status. All later pre/postactivation pair checks passed. Cause unproven;
+do not claim a filesystem/FTP fix or bypass incomplete-stage guards.
+Repair script/evidence is in ignored results/gta4-mfc-meter-20261030.
+
+**Current state:** CONTROL64 gate0/helper_probes0 installed. Candidate gate1
+is built locally but not installed. This is the original meter behavior with
+heavy helper probes compiled out, ready for matched baseline captures.
+No runtime/FPS result yet. Build record reflects verified control deployment.
+
+**NEXT USER ACTION:** launch same GTA IV save/stationary outdoor camera,
+allow compilation to settle, reply `MFC control ready`. Capture2x45s labels
+`mfc0064-control-run1`, `run2`, schedulerB/resolution150, all four tuning
+flags0, `--expected-mfc-meter-gate 0`. The tool must see boot marker gate0/
+helper_probes0, Performance Report false, no SPUHELP logs, no new SPU compilation.
+After controls, close title before candidate install and later A-return swap.
+Do not overwrite executables while running. No FPS benefit is established.
+
+
+## Matched0064 CONTROL captures complete - 2026-10-30
+
+User confirmed in-game readiness at the stationary outdoor reference.
+Recorded two independent 45-second patch0064 control captures with
+gta4-scheduler-ab.py; each validated compiled gate0/helper probes0,
+Performance Report OFF, scheduler B, SPU Mega, XFloat Approximate,
+resolution150, clock100, FPS cap60, required game patches applied,
+rsx_fifo_yield0, spu_insert_select0, spu_narrow_ls_store0, and
+spu_narrow_ls_check0. Both valid, no new SPU compilation.
+
+| Metric | Control1 | Control2 | Mean |
+| --- | ---: | ---: | ---: |
+| Window mean FPS | 23.48 | 23.36 | **23.42** |
+| Timestamp-weighted FPS | 23.483 | 23.364 | 23.424 |
+| Mean window 1% low FPS | 20.47 | 20.18 | 20.33 |
+| Mean window p50 interval ms | 42.62 | 42.88 | 42.75 |
+| Mean window p95 interval ms | 47.04 | 47.16 | 47.10 |
+| Mean window p99 interval ms | 48.99 | 49.72 | 49.36 |
+| Sampled RSX FIFO spinning CPU fraction | 20.31% | 19.63% | 19.97% |
+
+RSX worker measurements valid in both, zero worker slot overflow;
+old heavy diagnostics absent and frame tracer disabled. SPU worker
+sampling valid only in run1 (single unusual sampled gateway call);
+run2 had no valid SPU worker samples, not evidence that SPUs were idle.
+FIFO percentages reflect sampled RSX FIFO CPU wall time, not frame time
+or a predicted FPS opportunity. These are per-window summary averages,
+not pooled frame percentiles. Controls alone cannot prove a speedup.
+
+Raw data: results/gta4-mfc-meter-20261030/B-mfc0064-control-run1.json
+and B-mfc0064-control-run2.json, matching .log and
+-worker-activity.json files and control-run1-parser.txt and
+control-run2-parser.txt. Combined: results/gta4-mfc-meter-20261030/
+control-0064-combined.json. Builds record updated; installed build unchanged.
+
+**NEXT REQUIRED USER ACTION:** close GTA IV and KB-RPCS3 completely,
+and confirm both stopped. Do not swap executable pairs while running.
+After independent console process checks, run the hash-pinned 0064
+candidate installer (tools/deploy-gta4-mfc0064.py --variant candidate)
+and verify staged and installed ELF/mirror readbacks. Keep exact matched
+control for rollback, then capture two gate1 candidate runs in the same
+stationary warmed scene, and later two return-control runs after rollback.
+No candidate FPS improvement has been measured.
+
+
+## Matched0064 CANDIDATE installed, awaiting FPS captures - 2026-10-30
+
+User confirmed GTA IV and KB-RPCS3 fully closed after two validated
+control runs (23.48 and 23.36 FPS, two-run mean23.42). Installed matched
+patch0064 candidate with PS5_MFC_METER_GATE=1, helper_probes0 using
+tools/deploy-gta4-mfc0064.py --variant candidate. Initial candidate
+stage/backup absent, control live sizes verified. Installer process
+checks confirmed no eboot.bin or launcher before staging, at activation
+entry, and immediately before renames. Staged and preactivation
+decrypted ELF load/TLS matched the candidate converted build, while
+mirror SHA256 matched pinned
+67932ee98595f873c381e61cb7e4409ffc17c0bf61f7a4e0ebe261019241ed8a.
+Both previous control files backed up before stage files activated.
+Post-activation load/TLS and mirror SHA256 readback PASS, installer
+exited0 with SUCCESS. First independent full status query timed out;
+follow-up read-only FTP size check succeeded: live ELF117434056 and
+mirror74605329, preserved control backup 117434056 / 74605201
+under .before-mfc0064-candidate-20261030. Original patch0062
+control-install backup retained. No game configuration, data, saves,
+caches or tuning altered. Candidate in-game FPS and correctness
+not yet tested.
+
+**NEXT USER ACTION:** launch GTA IV same warmed stationary outdoor
+scene and reply MFC candidate ready. Capture two45s candidate runs
+mfc0064-candidate-run1 / run2 in results/gta4-mfc-meter-20261030.
+Require scheduler B, resolution150, gate1 helper_probes0,
+Performance Report false, four tuning flags all0, zero new SPU
+compilation, and all previous game checks. Compare against control
+mean23.42 FPS, then close GTA IV and KB-RPCS3 before guarded rollback
+for two final return controls. No FPS gain is established.
+
+
+## 2026-10-30: Chiaki-ng screenshot MCP companion built (host-only)
+
+User requested read-only visual inspection of PS5 Remote Play while working on GTA IV.
+Implemented standalone stdio MCP screenshot server inside sibling checkout
+`chiaki-ng/mcp-bridge/` (NOT an RPCS3 or Chiaki Qt binary change). Windows build:
+`chiaki-ng/mcp-bridge/dist/chiaki-screen-mcp.exe` (~8.4MB), source
+`mcp-bridge/chiaki_screen_mcp.py`, setup and safety details in the sibling
+`mcp-bridge/README.md`. Exposes `chiaki_screen_status` and
+`chiaki_capture_frame`, only for a fully visible foreground Chiaki process,
+read-only, max1920x1080, no game inputs, sessions, credentials or network server.
+Windows Python source tests 9/9 PASS; PyInstaller package PASS;
+packaged MCP initialize/list/status stdio smoke PASS; native Win32 GDI PNG
+capture PASS on a synthetic window with foreground simulated in the test
+harness (tool process could not claim actual desktop focus).
+**Actual live Chiaki/PS5 video capture not yet tested**: the Chiaki window
+was not running, and the bridge has NOT been registered as a tool in this
+ChatGPT conversation. GPU/HDR/occlusion effects remain unknown. It does not
+rebuild or replace the Chiaki-ng Qt app; standalone bridge is intentional
+to avoid modifying decoder/controller behavior, since Qt/CMake dependencies
+were unavailable locally. For GTA IV benchmarks, do not directly compare FPS
+with earlier no-Remote-Play baselines without measuring Remote Play overhead.
+Patch0064 candidate gate1 remained installed and its gameplay FPS capture
+remained outstanding when this visual helper was built; return to the
+stationary outdoor scene and the prior candidate test instructions.
+
+
+### 2026-10-30 23:18 UTC: Chiaki background screen bridge LIVE validation PASS
+
+User reported Chiaki streaming GTA IV. Verified the visible chiaki-ng
+Windows client window existed, 1920x1080, while it was not foreground.
+An initial foreground-only screenshot attempt was correctly refused and
+Windows disallowed SetForegroundWindow from the tool process. A
+**window-specific Win32 PrintWindow(PW_CLIENTONLY|PW_RENDERFULLCONTENT)**
+capture returned a genuine GTA IV game frame (Niko standing outdoors
+near a lamppost, map/performance overlay visible) at 640x360, with no
+console or controller changes. Revised companion
+`chiaki-ng/mcp-bridge/chiaki_screen_mcp.py` to version0.2.0 with
+background capture restricted to allowlisted visible Chiaki windows;
+other desktop applications are not targeted. Successfully rebuilt
+`chiaki-ng/mcp-bridge/dist/chiaki-screen-mcp.exe`. All nine tests PASS,
+Windows self-test PASS, packaged stdio MCP handshake PASS, and
+**packaged binary live MCP initialize + tools/call returned a real
+PNG of GTA IV while Chiaki was in the background** (640x360;
+reproducible via `python chiaki-ng/mcp-bridge/tests/live_mcp_smoke.py`).
+Updated sibling bridge README with build/privacy/usage details.
+ChatGPT sees frame on explicit request through the connected Local File
+Editor command path; not a native persistent MCP connector or continuous
+video. This is *visual* evidence only, NOT a comparable FPS measure.
+Still collect GTA IV gate1 candidate performance using prior recorded
+scheduler B / 150% / no-Remote-Play control conditions, or quantify the
+Remote Play effect with matched controls before claiming an improvement.
+
+
+### 2026-10-30 23:25 UTC: PS5 dashboard control via Chiaki MCP v0.3.0 — LIVE PASS
+
+User explicitly approved extending the screenshot-only bridge to PS5
+controller inputs. Added opt-in controller tool to the sibling
+chiaki-ng/mcp-bridge/chiaki_screen_mcp.py version 0.3.0. No modification
+to Chiaki-ng GUI, decoder, PS5 executable, game files, or saves.
+The server defaults to screenshot-only; input requires --enable-control.
+chiaki_press_button accepts only ps, ps_hold, up/down/left/right,
+cross (X), circle through Chiaki default keyboard mappings, PostMessageW
+addressed to allowlisted visible Chiaki window. No global SendInput,
+arbitrary typing, controller combos, network listener or persistent
+controller access. Button duration restricted and rate-limited.
+chiaki_disable_control disables the current server process.
+
+LIVE CONFIRMATION: Initial short PS press produced a screenshot of
+the PS5 Control Centre (showing "Please reconnect controller" at that
+moment). Rebuilt v0.3.0 standalone executable, 15/15 source tests
+PASS, packaged self-test and stdio MCP handshake PASS. Called
+actual packaged MCP chiaki_press_button button=ps_hold, duration=1350ms
+with opt-in and disabled process immediately afterward; fresh Chiaki
+screenshot showed PS5 Games Home with KB-RPCS3 tile selected.
+Then called one D-pad Right via new opt-in session: screenshot confirmed
+PS5X360 tile selected. Called Left via new opt-in session: screenshot
+confirmed KB-RPCS3 tile selected again. No game launched or settings
+changed. README and reusable control helper at sibling
+chiaki-ng/mcp-bridge/tests/live_control_mcp.py.
+
+PS Home DOES NOT IMPLY GTA IV / KB-RPCS3 fully stopped; the game
+may remain running in background. Before PS5 binary deployment, recheck
+process state independently. Patch0064 MFC gate1 candidate remains
+installed and FPS A/B/A benchmark is outstanding. Remote Play may affect
+FPS; prior 23.42 FPS baseline should not be assumed comparable to
+Remote Play conditions without matched tests.
+
+
+### 2026-10-30: Agent guides updated for on-demand closed-loop PS5 testing
+
+Updated workspace AGENTS.md and created KB-RPCS3/AGENTS.md and
+chiaki-ng/AGENTS.md for future AI-assisted testing. The documented
+workflow is: read latest game state, edit and build, verify both
+title/launcher processes stopped, safely stage and independently
+verify the paired PS5 artifacts, launch through the Chiaki-ng
+screen/controller MCP bridge when available, confirm each UI step
+with a fresh screenshot, capture native RPCS3 FPS/frame-time logs,
+then update research and perform guarded A/B/A rollback if needed.
+Agent guidance requires opt-in one-shot Chiaki button presses,
+read-only screen capture by default, no blind UI navigation,
+no saving private frame/base64 data, and no live executable swaps.
+It explicitly notes that PS5 Games Home does NOT prove GTA IV or
+KB-RPCS3 closed and that Remote Play may affect FPS comparisons.
+The bridge cannot start a Remote Play session; a visible Chiaki
+stream is required. It is tool-driven during an active session,
+not an unattended background service. These were **documentation
+changes only**, not a new runtime capture or console deployment.
+Patch0064 gate1 candidate FPS runs and return-control comparison
+remain outstanding; consult the latest experiment state.
+
+
+## Patch0064 automated candidate and guarded return-control - 2026-10-30
+
+Using the Chiaki-ng v0.3.0 MCP screen/controller bridge, resumed GTA IV
+from PS5 Home (it was already paused in the map), unpaused and visually
+confirmed the outdoor reference street near hydrant/lamppost. Captured
+two distinct 45-second candidate gate1/helper_probes0 windows:
+
+| Capture | FPS mean | 1% low mean | frame p50/p95/p99 ms | FPS windows | New SPU |
+| --- | ---: | ---: | --- | ---: | ---: |
+| mfc0064-candidate-run1 | 24.79 | 20.85 | 40.18 / 46.02 / 48.06 | 11 | 0 |
+| mfc0064-candidate-run2 | 25.06 | 21.28 | 39.88 / 44.74 / 47.14 | 12 | 0 |
+
+Both capture JSON files valid with no rejection reasons: latest profile
+patch0064 gate1, helper_probes0, scheduler B, SPU Mega, XFloat Approximate,
+resolution150, clocks100, frame limit60, Performance Report disabled,
+and four runtime tuning flags all0. Both RSX sampling checks valid,
+with sampled FIFO spin CPU share 16.14% and 13.24%; live SPU gateway
+coverage valid, but **completed SPU interval timing not available** and
+the live ages are not CPU-work duty-cycle estimates. Worker-activity
+JSON saved beside captures; two-run summary stored in
+results/gta4-mfc-meter-20261030/candidate-0064-combined.json.
+Candidate mean FPS **24.925**, mean 1% low **21.065**. Original gate0
+two-run FPS **23.42**; nominal gap +1.505 FPS, **not a credible patch
+speedup estimate** because the candidate was observed under Chiaki
+Remote Play and the earlier control was under different conditions.
+Only return controls using matched Remote Play can help attribute a gain.
+
+Returned to PS5 Games Home via PS hold, selected KB-RPCS3 Options >
+Close Game (extended the bridge allowlist with the default Chiaki
+Options/O mapping). Screenshot confirmed Home. Independent process
+listing via 192.168.0.137:9021 completed with no eboot.bin or launcher.
+Installer status confirmed candidate live and two matched gate0 backup
+files; the guarded candidate rollback exited0 and preserved gate1
+files as .mfc0064-candidate-stage. Post-rollback FTP status:
+live ELF117434056 / mirror74605201, staged candidate
+ELF117434056 / mirror74605329. Full independent downloaded control
+ELF load/TLS comparison PASS and mirror exact SHA256
+e48a5c75cc3357d7f51474d1ded457e4d27e221c15fde446023538d8f48eda7b
+PASS. Earlier patch0062 backup untouched.
+
+Navigated KB-RPCS3 game list through Chiaki, selected GTA IV NPUB30702,
+and visually confirmed boot/Building SPU Cache. New boot loaded inside
+Niko's apartment instead of the outdoor reference. Added bounded
+Chiaki left-stick movement from default keyboard bindings (Insert,
+Delete, bracket keys) with 60-1800ms limits and one-shot opt-in sessions;
+16/16 bridge tests and packaged executable smoke PASS. Moved through
+apartment door into stairwell, but scene/camera could not be matched.
+No return-control FPS capture was attempted. Game remains running
+inside building/stairwell on gate0 control. Live RPCS3 log preflight:
+gate0/helper_probes0, scheduler RPCS3 Scheduler, Mega SPU, 150%
+resolution, clocks100, XFloat Approximate, cap60, Performance Report
+false, 0 new SPU compilation lines and no MFC mode errors.
+
+**NEXT ACTION:** position Niko in same outdoor street at lamppost and
+fire hydrant, camera stationary and warmed; retain Chiaki Remote Play
+ON. Capture mfc0064-return-control-run1 and -run2, 45s each, using
+tools/gta4-scheduler-ab.py capture with --mode B,
+--expected-mfc-meter-gate 0, --expected-resolution 150 and all tuning
+flags0. Reject SPU compilation or altered scene. Then compare A/B/A
+with uncertainty about scene/time drift; no gain claimed yet. No
+executable swap while title runs.
+
+
+## Patch0064 A/B/A completed: no demonstrated gate1 FPS gain - 2026-10-31
+
+User returned Niko to the same GTA IV NPUB30702 outdoor street, standing
+near the lamppost and fire hydrant. Fresh live Chiaki screenshot verified
+the location before measurement; camera/Niko facing and moving vehicles/
+pedestrians were **not exactly identical** to the candidate phase.
+Matched patch0064 **gate0 control** remained installed and running
+(independently verified on boot: gate0, helper_probes0, scheduler B,
+resolution150%, Mega SPU, XFloat Approximate, clocks100%, cap60,
+Performance Report off, experiment tuning0). Took two distinct 45s
+return-control runs without moving Niko.
+
+| Variant / run | Mean FPS | Mean window 1% low FPS | Window p50 / p95 / p99 ms | Windows | New SPU |
+| --- | ---: | ---: | --- | ---: | ---: |
+| Original gate0 control 1 | 23.48 | 20.47 | 42.62 / 47.04 / 48.99 | 12 | 0 |
+| Original gate0 control 2 | 23.36 | 20.18 | 42.88 / 47.16 / 49.72 | 11 | 0 |
+| Gate1 candidate 1 | 24.79 | 20.85 | 40.18 / 46.02 / 48.06 | 11 | 0 |
+| Gate1 candidate 2 | 25.06 | 21.28 | 39.88 / 44.74 / 47.14 | 12 | 0 |
+| Return gate0 control 1 | **27.36** | 23.15 | 36.54 / 41.64 / 43.28 | 11 | 0 |
+| Return gate0 control 2 | **27.72** | 23.78 | 36.21 / 40.82 / 42.14 | 11 | 0 |
+
+All six scripted capture validators passed with no rejection reasons,
+correct MFC compiled gate/probe markers and zero new SPU compilations.
+Return gate0 means: **27.54 FPS**, 1% low **23.465 FPS**, p50 **36.375ms**,
+p95 **41.23ms**, p99 **42.71ms**. Candidate gate1 means: **24.925 FPS**,
+1% low **21.065 FPS**, p50 **40.03ms**, p95 **45.38ms**, p99 **47.60ms**.
+Gate1 − return gate0 = **−2.615 FPS / −9.5%**. Candidate minus original
+gate0 = +1.505 FPS, but this is not valid evidence of improvement.
+
+Per-run `gta4-worker-activity.py` reports parsed successfully. RSX
+FIFO spinning share of sampled FIFO CPU time: historical gate0
+**20.31%, 19.63%**, gate1 **16.14%, 13.24%**, return gate0
+**15.18%, 10.71%**; descriptive classifications only, not GPU command
+counts or a causal throughput explanation. RSX measurement valid
+for all six; live SPU gateway coverage valid. Completed SPU timing
+is absent on some runs, so do not infer SPU idle/duty cycle.
+
+**Critical limitations:** (1) original gate0 controls predated use of
+Chiaki Remote Play in the test loop; candidate and return controls
+used Chiaki ON; (2) after a safe reboot, user manually walked back
+to the lamppost/hydrant street, with slightly different viewpoint
+and differing traffic/pedestrian dynamics; (3) time-of-day, run order,
+cache/warmup and reboot state can drift; (4) reported summaries average
+individual FPS windows, not pooled raw-frame percentiles. A/B/A does
+not establish causal significance from two samples per phase.
+
+**Conclusion:** compiled `PS5_MFC_METER_GATE=1` has **no demonstrated
+reproducible gain** in GTA IV with Performance Report disabled. Do
+not promote candidate as an FPS optimization; nor claim a proven
+−9.5% regression. Maintain verified gate0 control and focus next
+research on measured RSX/SPU/rendering bottlenecks or improve the
+scene-matching test protocol before reconsidering gate1.
+
+**Console state:** gate0 control installed after process-checked
+rollback with independent ELF load/TLS and mirror SHA256 verification;
+gate1 retained as staged paired files; patch0062 backup untouched.
+GTA IV remained running in the reference outdoor scene when the
+return-control capture completed. No binary/config/save changes
+during capture. Close and independently list running title/launcher
+before *any* future executable swap.
+
+Saved data: `results/gta4-mfc-meter-20261030/` with individual
+`B-mfc0064-return-control-run{1,2}.json/.log`, `-worker-activity.json`,
+`return-control-0064-combined.json` and `comparison-0064-aba.json`,
+plus the earlier original-control/candidate combined files and builds.json.
+
+
+## Patch0065 RSX method-word diagnostic on PS5, rolled back - 2026-10-31
+
+Implemented port patch0065 after completed patch0064 gate experiment:
+a **diagnostic-only** sparse probe in the actual RSX run_FIFO method
+loop. It measures 1/512 method-bearing calls, counting loop iterations,
+direct handlers and flattener-suppressed words, with a watchdog
+aggregate; no guest state/command dispatch decisions changed.
+Prior full source bytes archived and exact reverse/forward patch
+replay PASS. Clang++19 native tests with probe OFF/ON PASS.
+Full PS5 core+title build, native TLS, nine package gates, exact
+RPCS3PS5TEXT 28-byte wrapper plus payload/PT_LOAD correspondence PASS.
+The local diagnostic compile explicitly pinned MFC gate0/probes0.
+
+Guarded installer staged and deployed the matched diagnostic pair
+only after complete process-list checks found no GTA IV/launcher;
+verified both stage files and installed ELF load/TLS/mirror SHA256.
+Preserved original matched gate0 pair as
+`.before-rsx0065-20261031`. Booted GTA IV via Chiaki, verified
+runtime gate0/probes0, scheduler B, 150% resolution, Mega SPU,
+Approximate XFloat, clocks100%, cap60 and all tuning flags0.
+Game loaded in Niko apartment facing blue door; diagnostic workload
+was **indoors**, not comparable with the outdoor FPS A/B/A.
+
+| 45s indoor capture | Sampled method runs | Method-loop words | Direct handler calls | Words per run | Handlers per run | Max words |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| rsx0065-indoor-run1 | 158,280 | 330,241 | 217,542 | 2.0864 | 1.3744 | 288 |
+| rsx0065-indoor-run2 | 146,945 | 305,823 | 200,942 | 2.0812 | 1.3675 | 288 |
+| **Combined** | **305,225** | **636,064** | **418,484** | **2.08392** | **1.37107** | **288** |
+
+Both capture JSON files valid with zero new SPU compilations; method
+probe parser validated no contradictory counts. Zero flattened
+suppression in this workload; about **65.79%** of sampled loop words
+call a direct methods[reg] handler. Under stationary indoor
+conditions FPS was capped near60; this is **not evidence of a
+speedup**. Values are periodic samples not a complete or
+unbiased histogram, GPU commands, exclusive CPU cost, or frame
+critical-path time. An occasional 288-word run is real observed
+sampled work but may not be representative of outdoor gameplay.
+
+Closed game normally via PS5 KB-RPCS3 Options > Close Game.
+Independent full process list found neither title nor launcher.
+Guarded rollback restored matched gate0 control (ELF117434056 /
+mirror74605201); diagnostic patch0065 preserved as
+`.rsx0065-stage` (ELF117434176 / mirror74605521).
+Original gate1 0064 stage remains present. Independent full
+download confirmed gate0 ELF load/TLS and exact code-mirror
+SHA256 `e48a5c75cc3357d7f51474d1ded457e4d27e221c15fde446023538d8f48eda7b`.
+Original patch0062 backup retained, and saves/configs unchanged.
+Title and launcher were independently confirmed **closed** after
+rollback.
+
+Data: `results/gta4-rsx-words-20261031/`, combined result
+`rsx0065-indoor-combined.json` plus per-run FPS/log/counter JSONs.
+Source, build hashes, deploy workflow, purpose and limitations in
+`game research/GTA-IV-RSX-methodwords-20261031.md`.
+**NEXT:** use these data to design a sparse method/register-class
+distribution or exclusive RSX dispatch CPU cost measurement before
+selecting a semantic-preserving optimisation. No FPS gain claimed.
+
+
+## Patch0066 live method-register histogram completed; gate0 restored — 2026-10-31
+
+Selected manifest patch count66 after diagnostic-only patch0065.
+Sampled the same one-in-512 *method-bearing* run_FIFO calls,
+attributing actually decoded register words and direct
+methods[reg] calls into 256 buckets of 256-byte RSX offsets.
+Watchdog emits `PS5 RSXCLASS2` full totals and top-12
+`PS5 RSXCLASS` ranked buckets per roughly four-second window.
+No guest method/RSX FIFO/state behavior modified. Native
+Clang++19 probe-on/off tests and exact source reverse/forward
+patch replay PASS. Full PS5 core/title build, native TLS template
+128/memory15104/alignment32, nine package gates, 28-byte
+RPCS3PS5TEXT wrapper and byte-identical full ELF executable
+PT_LOAD mirror PASS. Diagnostic archive and hashes:
+`/home/callum/work/rsx0066-registerclasses-20261031/`.
+
+After complete PS5 process listing verified no title or
+launcher, guarded pair staging/activation and independently
+readback verified ELF/TLS/mirror. Saved original gate0 in
+`.before-rsx0066-20261031`. Booted GTA IV through Chiaki.
+Startup log MFC gate0/helper probes0; warmed game spawned
+*inside Niko's apartment facing the blue exit door*, the same
+indoor diagnostic location used in patch0065. No outdoors
+FPS A/B attempted. Two 45s captures both valid with
+zero new SPU compilations; indoor FPS at 60 cap.
+
+| Register offset band | Run1 words/handlers | Run2 words/handlers | Combined words | Combined direct handlers |
+| --- | --- | --- | ---: | ---: |
+| 0x1800–0x18FF | 61,025 / 56,874 | 63,334 / 59,337 | **124,359** | **116,211** |
+| 0x1700–0x17FF | 54,350 / 29 | 53,002 / 33 | **107,352** | **62** |
+| 0x1600–0x16FF | 40,088 / 40,088 | 43,563 / 43,563 | **83,651** | **83,651** |
+| 0x0300–0x03FF | 34,554 / 17,121 | 35,211 / 17,500 | **69,765** | **34,621** |
+| 0x1A00–0x1AFF | 34,932 / 34,932 | 34,798 / 34,798 | **69,730** | **69,730** |
+| 0x1F00–0x1FFF | 23,472 / 20,145 | 23,508 / 20,281 | **46,980** | **40,426** |
+
+Full sampled 256-bucket totals across both runs:
+**660,003 method words**, **435,865 direct handler calls**,
+top12 coverage ~**98.77%**, 26 valid histogram watchdog reports.
+`results/gta4-rsx-classes-20261031/rsx0066-indoor-combined.json`
+includes every top band and full per-capture output.
+
+Exact source `rpcs3/Emu/RSX/gcm_enums.h` examples:
+0x1740 `NV4097_SET_VERTEX_DATA_ARRAY_FORMAT`, 0x1680
+`NV4097_SET_VERTEX_DATA_ARRAY_OFFSET`, 0x1808
+`NV4097_SET_BEGIN_END`, 0x1814 `NV4097_DRAW_ARRAYS`,
+0x1824 `NV4097_DRAW_INDEX_ARRAY`, 0x1A00
+`NV4097_SET_TEXTURE_OFFSET`, and 0x1F00
+`NV4097_SET_TRANSFORM_CONSTANT`. These are names of registers
+within a 256-byte range, **not exact frequencies**.
+The 0x1700 bucket has 107,352 sampled words but only
+62 direct handler calls; potentially state-latch/format updates,
+not evidence of a high-CPU bottleneck. Investigate exact registers
+and value-change rates before modifying decode/dispatch.
+
+**Limitations:** periodic 1/512 sampling may alias with workload;
+top12 lists omit less active bands, though totals include all
+256 bins; class counters and RSXWORDS counters are independently
+drained across watchdog boundaries; method packet count is not
+exclusive handler CPU time or GPU utilization. This light
+indoor scene hits a 60FPS cap. No proven performance win.
+
+Closed title normally through Chiaki KB-RPCS3 > Options >
+Close Game. Independent completed process list confirmed both
+title and launcher absent. Guarded patch0066 rollback exited0.
+Independent full downloaded prior patch0064 control ELF load/TLS
+and mirror exact SHA256 verification PASS. Live sizes
+ELF117434056/mirror74605201. Patch0066
+stage ELF117438440/mirror74607761 retained; patch0065
+and patch0064 candidate stages also preserved. No game saves,
+config or caches changed. Both processes closed after test.
+
+**Suggested next phase:** targeted exact-register/value-change
+measurement on the 0x1700 range, or narrow sampled CPU timings
+of 0x1800/0x1600/0x1A00 handler paths. Require fresh outdoor
+matching and diagnostic-off controls before FPS claims.
+
+
+## External PS5 RPCS3 forks screened for CPU speedups — 2026-10-31
+
+Reviewed lavavex/rpcs3-PS5, its actual emulator submodule `lavavex/rpcs3:ps5`, and 10 identifiable public direct wrapper forks. Evidence and compatibility matrix in `game research/GTA-IV-lavavex-forks-CPU-audit-20261031.md`. No measured GTA IV FPS optimization to import. Lavavex core is older upstream (Oct6 vs KB Oct29); KB already uses `-march=znver2 -O3`, and upstream state decoding/PPU cache improvements are already present. Their PS5 CPU usage overlay patch might improve PPU attribution as *instrumentation*, after runtime validation. Their std::mutex self-notify patch is not applicable to KB's PS5 `USE_FUTEX` path; v0ltfault's FW7.40 JIT exec pool is opt-in and unrelated to known warm-frame bottleneck; jmelovich's /dev device-size fix is cross-game compatibility only. No PS5 or source changes made in this audit; current verified installed title remains patch0064 gate0, title/launcher previously closed. Prior patch0066 results and next exact-register/exclusive CPU-time investigation remain valid.
+
+
+## Patch0067 PS5 CPU-time grouping: on-console results and safe return (2026-10-31)
+
+Lavavex commit https://github.com/lavavex/rpcs3/commit/5e0e0e613d218e2450b8b3c8adab4576286ca92c adds PPU/SPU/RSX CPU time to its performance overlay via thread_ctrl::get_cycles(). On KB's tested PS5, pthread_getcpuclockid(target) returns the calling thread's clock, so directly backporting it would risk bogus data. The current KB Utilities/Thread.cpp has a signal-based monitor: send SIGUSR1 to every registered RPCS3 worker, and each worker reports its own CLOCK_THREAD_CPUTIME_ID nanoseconds. Patch0067 reuses SAME snapshots (no extra signals) and aggregates ALL worker deltas into PPU, SPU, exact main rsx::thread, OTHER. Other includes SPU JIT compilation worker pool, graphics helpers and miscellaneous RPCS3 host threads, so avoid assuming that OTHER is idle CPU or that main-RSX is complete graphics-driver time. Percent is of one logical host hardware thread, not a physical core or game frame.
+
+Source patch: port/rpcs3-latest-patches/0067-PS5-report-exact-PPU-SPU-RSX-main-host-CPU-time.patch. Source original /home/callum/work/ps5cpu0067-original-20261031. Reversible patch replay PASS; GCC and Clang++19 C++20 tests PASS (port/tests/check-ps5-cpu-groups.py); synthetic legacy/exact parser tests PASS (port/tests/check-ps5-cpugroups-parser.py). Full PS5 build, TLS 128/15104/alignment32, ELF vs code-mirror full byte equality, all nine package checks PASS. Archived pair/hashes at /home/callum/work/ps5cpu0067-groups-20261031. Guarded stage/readback/activate verified no title or launcher processes, retained prior full gate0 pair, matched ELF load and TLS, code mirror SHA256. Loaded GTA IV normally via Chiaki and warmed SPU compilation before captures.
+
+| GTA IV apartment measurement (logical-core equivalents) | Run1 | Run2 | Mean |
+| --- | ---: | ---: | ---: |
+| PPU | 1.577 | 1.552 | **1.565** |
+| SPU | 3.883 | 3.827 | **3.855** |
+| Main RSX | 0.557 | 0.550 | **0.554** |
+| Other RPCS3 host threads | 0.083 | 0.082 | **0.083** |
+| All registered host threads | 6.093 | 6.005 | **6.049** |
+| FPS (60 cap) | 59.94 | 59.96 | **59.95** |
+
+Each capture had 45s, 11 FPS windows and 12 valid exact CPU time reports; both had zero new SPU compilations. Captures/logs and per-run parsed JSON are in results/gta4-ps5cpu-20261031/; combined result is ps5cpu0067-indoor-combined.json. The 60 cap prevents FPS inference. CPU time over parallel workers cannot distinguish which wait or worker gated frame delivery. Out-of-registry driver/kernel tasks are excluded.
+
+**Previously captured historical GTA IV CPU lower bounds (top14-only reports):** initial outdoor control ~23.42 FPS and total ~8.94 logical cores, printed PPU ~2.35/SPU ~5.52/main RSX ~0.89; return outdoor gate0 control ~27.54 FPS, total ~8.77, top14 PPU ~2.22/SPU ~5.45/main RSX ~0.92. Historical JSON: results/gta4-rsx-classes-20261031/ps5cpu0067-historical-top14-estimates.json. These older group values omit smaller workers and have integer rounding; differing outdoor scenes/Remote Play/boot state confound FPS attribution. The SPU group being busier is NOT itself evidence it controls the FPS.
+
+**Rollback:** Chiaki Games Home, selected KB-RPCS3, Options, Close Game. Complete independent process list verified title/launcher stopped, guarded rollback exit0. Independent download confirmed restored original ELF PT_LOAD and PT_TLS and exact original mirror SHA256; the title files now have original gate0 sizes (ELF 117434056 bytes; mirror 74605201 bytes). Both diagnostic stage files remain (0067 ELF 117438656 bytes; mirror 74608465 bytes). Final process list after rollback again confirms both processes closed. No user game data or config changed.
+
+**Next:** measure exact CPU groups in *uncapped, matched outdoor gameplay* with stable controls, and pair with PPU/SPU/RSX wait or per-frame critical-path evidence before making any performance optimization.
+
+
+## Patch0067 matched-area outdoor CPU experiment, completed 2026-10-31
+
+User positioned GTA IV Niko beside the hydrant/lamppost outdoors. Two 45s gate0 controls were captured in that exact user-set viewpoint; both passed 11 FPS reporting windows, gate0/helper probes0 and zero new SPU compilations. The PS5 title and launcher were stopped via Chiaki Home > KB-RPCS3 Options > Close Game, independently process-checked, and the staged patch0067 paired executable/mirror activated with guarded full SHA256 and ELF/TLS readback. The game rebooted into the apartment, and bounded Chiaki movement returned Niko to the same block; new viewpoint, precise Niko position, daylight and traffic were different. Both 45s patch0067 outdoor diagnostic runs passed, with 12 exact all-registered-thread CPU reports each and zero new SPU compiles.
+
+| Phase | Run 1 FPS | Run 2 FPS | Mean FPS | PPU host cores | SPU host cores | Main RSX host cores |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Original gate0 control, top14 group LOWER BOUNDS | 26.77 | 29.35 | **28.06** | 2.2815 | 5.5300 | 0.9425 |
+| Patch0067 exact all-worker groups | 28.20 | 29.32 | **28.76** | 2.2925 | 5.4435 | 0.9215 |
+
+Original gate0 total CPU ~8.937 logical host cores; patch0067 total ~8.737, OTHER ~0.0845. Control group sums omit registered workers outside top 14, but its overall total includes all registered workers. Patch0067 exact group counts include all registered workers, not kernel/driver threads outside the registry. Six guest SPU threads consume ~5.44 cores total and the main RSX worker ~0.92 of one logical host core. Summed CPU time does NOT say which thread waits on another or gates the next frame. Neither phase was FPS capped in the outdoor street. The control samples themselves differed by 2.58FPS. Nominal +0.70FPS diagnostic phase difference is NOT an optimization result: changed camera/position/traffic/lighting, load/boot conditions and sampling order make it noncausal.
+
+After capture, game closed normally via Chiaki; independent full PS5 process list confirmed no title or launcher. Guarded patch0067 rollback exit0; independently downloaded restored exact gate0 executable ELF load/TLS and code mirror exact SHA256 verification PASS. Patch0067 remains staged; old gate1 and diagnostic stages remain intact; no game data/config/cache changes.
+
+Data: results/gta4-ps5cpu-20261031/ps5cpu0067-outdoor-control-vs-diagnostic-20261031.json, four individual FPS/log files, ps5cpu0067-outdoor-control-groups.json and ps5cpu0067-outdoor-run1-groups.json / ps5cpu0067-outdoor-run2-groups.json. Next capture PPU/SPU/RSX per-frame dependency and waits in a same-angle outdoor test before any source-code optimization.
+
+
+## Patch0068 SPU reservation-wait timings, completed 2026-10-31
+
+Two stationary outdoor GTA IV 45s diagnostic captures passed, zero new SPU compiles, mean27.36FPS. Patch0068 exact invocation counts during the complete watchdog intervals: 453056 reservation callbacks (~4885/s), 342418 atomic waits (~3692/s), 115436 nested notify_all calls (~1245/s). Timed 1/128 samples separate CLOCK_MONOTONIC and CLOCK_THREAD_CPUTIME_ID: callback 3.141us wall/1.431us worker CPU; atomic wait 114.410us wall/9.627us worker CPU; notification 3.013us wall/1.397us worker CPU. Nested metrics cannot be summed as exclusive costs; samples include clock overhead and phase bias. Waiting time is predominantly non-running time, **not proof it limits FPS**. Native TLS lookup is already cheap. See GTA-IV-SPU-reservation-wait-timing-20261031.md. Guarded diagnostic rollback and independently verified original patch0064 gate0 ELF PT_LOAD/TLS + exact mirror SHA256 PASS, both processes CLOSED; 0068 retained in .spuwait0068-stage, no user configs or saves changed. Source patch count68 is NOT installed.
+
+
+## Patch0069: sampled SPU reservation page and notification origin (2026-10-31)
+
+After completed patch0068 elapsed-vs-CPU wait measurement, patch0069 measured which 4KiB guest page receives sampled SPU waits and which guest thread class initiates successful notification transitions. Two valid 45s stationary **outdoor** captures, FPS28.77 / 26.78, zero new SPU compiles. 1/128 per-host-worker/path samples: 2449 wait returns, 2279 successful notifier transitions; 0 table overflow. 2429 SPU wait samples (**99.18%**) on guest page **0x017F7000**; changed notifier flag2421, cleared reservation8; 256 PPU-origin and 1689 SPU-origin successful notify samples on same page. Other 20 wait samples on 0x017F8000. Note global notifier samples also include pages not in top8 wait list. Notification caller is not necessarily guest data writer or actual wake cause. Per-4s window wait count correlated positively with FPS (+0.663), but per-estimated-frame-normalized counts only weakly (+0.115). **No FPS speedup or actual frame-gating dependency is proven.** Next identify exact 128B line and guest data writer/callsites. Original patch0064 gate0 installed and independently ELF/TLS + mirror hash verified after guard rollback; game and launcher CLOSED; patch0069 safely staged. See GTA-IV-SPU-reservation-page-attribution-20261031.md.

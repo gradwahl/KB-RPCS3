@@ -52,6 +52,15 @@ endforeach()
 file(WRITE ${CMAKE_BINARY_DIR}/samples.txt "${PS5_SAMPLES}")
 
 file(GLOB base_sources ${ROOT}/base/*.cpp)
+set(framegen_sources
+	${ROOT}/framegen/src/fg_common.cpp
+	${ROOT}/framegen/src/fg_vulkan.cpp
+	${ROOT}/framegen/src/fg_neural.cpp
+	${ROOT}/framegen/src/fg_splat.cpp)
+configure_file(src/framegen_model.cpp.in ${CMAKE_BINARY_DIR}/framegen_model.cpp @ONLY)
+# .incbin embeds the exact weights into the signed executable/code pair.
+set_source_files_properties(${CMAKE_BINARY_DIR}/framegen_model.cpp PROPERTIES
+	OBJECT_DEPENDS ${ROOT}/framegen/models/network.fgw)
 list(FILTER base_sources EXCLUDE REGEX "VulkanAndroid|VulkanOHOS")
 set(third_party_sources
 	${ROOT}/external/imgui/imgui.cpp
@@ -81,6 +90,8 @@ else()
 endif()
 add_library(samples OBJECT
 	${base_sources}
+	${framegen_sources}
+	${CMAKE_BINARY_DIR}/framegen_model.cpp
 	${third_party_sources}
 	${sample_sources}
 	src/main.cpp
@@ -89,6 +100,7 @@ add_library(samples OBJECT
 	src/ps5_dl.c
 	src/ps5_fastclock.c
 	src/ps5_tuning.c
+	src/ps5_framegen.cpp
 	src/import_check.c
 	src/launcher.cpp
 	src/samples.cpp
@@ -103,6 +115,7 @@ target_compile_definitions(samples PRIVATE
 	VK_EXAMPLE_ASSETS_DIR="${app_root}/assets/"
 	VK_EXAMPLE_SHADERS_DIR="${app_root}/shaders/")
 target_include_directories(samples PRIVATE
+	${ROOT}/framegen/include
 	${ROOT}/external
 	${ROOT}/external/glm
 	${ROOT}/external/imgui

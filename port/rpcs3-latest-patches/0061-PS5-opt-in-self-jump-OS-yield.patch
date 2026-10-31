@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Fri, 30 Oct 2026 20:15:00 +0000
+Subject: [PATCH] PS5: opt-in direct OS yield for watched FIFO self-jumps
+
+Key 11 (rsx_fifo_yield) defaults to zero: preserve the shared yield
+wrapper. Mode one calls scePthreadYield only after read() observes an
+unchanged watched self-jump. Real empty queues and pending arguments
+retain the original policy. No blocking notification wait, command skip,
+FIFO ordering or guest-state changes. Return after one yield so normal
+outer-loop stop/pause/backend service and memory rechecks continue.
+This is an experiment, not a demonstrated FPS improvement.
+
+---
+diff --git a/rpcs3/Emu/RSX/RSXFIFO.cpp b/rpcs3/Emu/RSX/RSXFIFO.cpp
+--- a/rpcs3/Emu/RSX/RSXFIFO.cpp
++++ b/rpcs3/Emu/RSX/RSXFIFO.cpp
+@@ -5,6 +5,10 @@
+ #include "RSXThread.h"
+ #ifdef __PROSPERO__
+ #include "ps5_rsx_perf.h"
++
++extern "C" s64 rpcs3ps5_tune(int key);
++extern "C" int scePthreadYield(void);
++static constexpr int PS5_TUNE_RSX_FIFO_YIELD = 11;
+ #endif
+ #include "Capture/rsx_capture.h"
+ #include "Core/RSXReservationLock.hpp"
+@@ -791,7 +795,20 @@
+ 				}
+ 				else
+ 				{
+-					std::this_thread::yield();
++#ifdef __PROSPERO__
++					// Only a confirmed, unchanged self-jump word may use the
++					// experiment. Real empty queues keep the historic policy.
++					// Return after one OS yield: the outer loop still handles
++					// stop/pause/backend work and the next read rechecks memory.
++					if (fifo_ctrl->is_self_jump_wait() && rpcs3ps5_tune(PS5_TUNE_RSX_FIFO_YIELD) == 1)
++					{
++						scePthreadYield();
++					}
++					else
++#endif
++					{
++						std::this_thread::yield();
++					}
+ 				}
+ 
+ 				return;
+diff --git a/rpcs3/Emu/RSX/RSXFIFO.h b/rpcs3/Emu/RSX/RSXFIFO.h
+--- a/rpcs3/Emu/RSX/RSXFIFO.h
++++ b/rpcs3/Emu/RSX/RSXFIFO.h
+@@ -177,6 +177,10 @@
+ 			void invalidate_cache() { m_cache_size = 0; }
+ 
+ 			u32 get_pos() const { return m_fifo_pos; }
++#ifdef __PROSPERO__
++			// read() clears the watch before returning a true empty queue.
++			bool is_self_jump_wait() const { return !m_remaining_commands && m_memwatch_addr && m_fifo_pos == m_memwatch_addr; }
++#endif
+ 			u32 last_cmd() const { return m_cmd; }
+ 			void sync_get() const;
+ 			std::span<const u32> get_current_arg_ptr(u32 length_in_words) const;

@@ -1,5 +1,26 @@
 # GTA IV — NPUB30702
 
+<!-- latest-state:start -->
+**Latest GTA IV PS5 patch0069 SPU reservation-page and producer diagnostic (2026-10-31): COMPLETE and SAFELY ROLLED BACK.** Two valid stationary outdoor 45s GTA IV NPUB30702 runs, Chiaki ON, MFC gate0/helper probes0, 150%/scheduler B/Mega SPU/XFloat Approximate/tuning0; FPS **28.77 and 26.78**, mean **27.775**, zero new SPU compilations. Across 23 complete ~4s windows, sampled 1/128 per worker/path **2,449 SPU waits**, **2,279 successful notifier transitions**, no table overflows. Of waits, **2,429 = 99.18%** on guest page **0x017F7000** (2,421 changed flag, 8 cleared reservation); 256 PPU-thread and 1,689 SPU-thread successful notifier samples hit this page. Other 20 wait samples were 0x017F8000. Notifier source is not necessarily the guest data writer or the cause of a particular wake. Raw FPS/wait-count correlation +0.663 across 4s windows; normalized by estimated displayed frames only +0.115. This strongly supports a coordination hotspot, **NOT a demonstrated frame bottleneck or FPS improvement**.
+
+**Console NOW:** original patch0064 **gate0 matched control RESTORED** after guarded rollback. Independent full ELF PT_LOAD/TLS and exact code mirror SHA256 **e48a5c75cc3357d7f51474d1ded457e4d27e221c15fde446023538d8f48eda7b** PASS. Complete independent PS5 process listing confirms both game and launcher **CLOSED**. Patch0069 preserved in .spuwake0069-stage (ELF117439088 bytes, mirror74612497 bytes), backup slot empty; older 0068/0067/0066/0065 and gate1 stage preserved. Patch manifest count69 refers to WSL source, **not installed PS5**. No game saves/config/caches changed. Full handoff: game research/GTA-IV-SPU-reservation-page-attribution-20261031.md and results/gta4-spu-wakeup-20261031/spuwake0069-outdoor-combined.json. Next: identify exact 128B reservation line and actual PPU/SPU data-writer callsites in 0x017F7000, not speculate on TLS or atomic timeouts.
+<!-- latest-state:end -->
+
+## Latest experiment outcome - October 30, 2026
+
+Patch0061 FIFO self-jump direct-OS-yield A/B/A is complete: initial control
+26.26, candidate 25.90, return control 25.69 FPS (two valid 45s runs each,
+zero new SPU compilations). **No demonstrated useful FPS gain.** Original
+policy retained, mode 0, exact original absent tuning file restored.
+Patch0061 remains installed; patch0060 paired rollback preserved. Do not
+repeat this candidate without new evidence. Next proposed focus: repair
+missing SPU timing coverage before selecting a SPU optimisation.
+
+See [FIFO experiment](GTA-IV-FIFO-yield-experiment-20261030.md) and
+[performance audit](GTA-IV-performance-audit-20261030.md) for current state,
+raw capture paths, caveats and the completed six-run comparison. Evidence
+below describes earlier stages and must not override that latest state.
+
 ## Verified console evidence — October 30, 2026
 
 Console FTP: `192.168.0.137:2121`. Latest-upstream PS5 port; installed code mirror
@@ -1223,3 +1244,199 @@ switchback controls**. Evaluate A(ON) → B(OFF) → A(ON);
 optional return OFF for A/B/A/B if equivocal. Do not
 claim an optimisation or final overhead finding before
 these repeat controls.
+
+
+## Complete CPU menu baseline - 2026-10-30
+
+User clarified that62 means the CPU menu item count, not build0062.
+The complete menu-order settings mapped from validated GTA IV runtime are
+in [CPU settings baseline](GTA-IV-CPU-settings-baseline-20261030.md).
+Use per-game scope: screenshot shows global For all games and OS scheduler;
+GTA IV captures used RPCS3 Scheduler. No console/config changes performed.
+
+
+## Patch0065 RSX method-word diagnostic on PS5, rolled back - 2026-10-31
+
+Implemented port patch0065 after completed patch0064 gate experiment:
+a **diagnostic-only** sparse probe in the actual RSX run_FIFO method
+loop. It measures 1/512 method-bearing calls, counting loop iterations,
+direct handlers and flattener-suppressed words, with a watchdog
+aggregate; no guest state/command dispatch decisions changed.
+Prior full source bytes archived and exact reverse/forward patch
+replay PASS. Clang++19 native tests with probe OFF/ON PASS.
+Full PS5 core+title build, native TLS, nine package gates, exact
+RPCS3PS5TEXT 28-byte wrapper plus payload/PT_LOAD correspondence PASS.
+The local diagnostic compile explicitly pinned MFC gate0/probes0.
+
+Guarded installer staged and deployed the matched diagnostic pair
+only after complete process-list checks found no GTA IV/launcher;
+verified both stage files and installed ELF load/TLS/mirror SHA256.
+Preserved original matched gate0 pair as
+`.before-rsx0065-20261031`. Booted GTA IV via Chiaki, verified
+runtime gate0/probes0, scheduler B, 150% resolution, Mega SPU,
+Approximate XFloat, clocks100%, cap60 and all tuning flags0.
+Game loaded in Niko apartment facing blue door; diagnostic workload
+was **indoors**, not comparable with the outdoor FPS A/B/A.
+
+| 45s indoor capture | Sampled method runs | Method-loop words | Direct handler calls | Words per run | Handlers per run | Max words |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| rsx0065-indoor-run1 | 158,280 | 330,241 | 217,542 | 2.0864 | 1.3744 | 288 |
+| rsx0065-indoor-run2 | 146,945 | 305,823 | 200,942 | 2.0812 | 1.3675 | 288 |
+| **Combined** | **305,225** | **636,064** | **418,484** | **2.08392** | **1.37107** | **288** |
+
+Both capture JSON files valid with zero new SPU compilations; method
+probe parser validated no contradictory counts. Zero flattened
+suppression in this workload; about **65.79%** of sampled loop words
+call a direct methods[reg] handler. Under stationary indoor
+conditions FPS was capped near60; this is **not evidence of a
+speedup**. Values are periodic samples not a complete or
+unbiased histogram, GPU commands, exclusive CPU cost, or frame
+critical-path time. An occasional 288-word run is real observed
+sampled work but may not be representative of outdoor gameplay.
+
+Closed game normally via PS5 KB-RPCS3 Options > Close Game.
+Independent full process list found neither title nor launcher.
+Guarded rollback restored matched gate0 control (ELF117434056 /
+mirror74605201); diagnostic patch0065 preserved as
+`.rsx0065-stage` (ELF117434176 / mirror74605521).
+Original gate1 0064 stage remains present. Independent full
+download confirmed gate0 ELF load/TLS and exact code-mirror
+SHA256 `e48a5c75cc3357d7f51474d1ded457e4d27e221c15fde446023538d8f48eda7b`.
+Original patch0062 backup retained, and saves/configs unchanged.
+Title and launcher were independently confirmed **closed** after
+rollback.
+
+Data: `results/gta4-rsx-words-20261031/`, combined result
+`rsx0065-indoor-combined.json` plus per-run FPS/log/counter JSONs.
+Source, build hashes, deploy workflow, purpose and limitations in
+`game research/GTA-IV-RSX-methodwords-20261031.md`.
+**NEXT:** use these data to design a sparse method/register-class
+distribution or exclusive RSX dispatch CPU cost measurement before
+selecting a semantic-preserving optimisation. No FPS gain claimed.
+
+
+## Patch0066 live method-register histogram completed; gate0 restored — 2026-10-31
+
+Selected manifest patch count66 after diagnostic-only patch0065.
+Sampled the same one-in-512 *method-bearing* run_FIFO calls,
+attributing actually decoded register words and direct
+methods[reg] calls into 256 buckets of 256-byte RSX offsets.
+Watchdog emits `PS5 RSXCLASS2` full totals and top-12
+`PS5 RSXCLASS` ranked buckets per roughly four-second window.
+No guest method/RSX FIFO/state behavior modified. Native
+Clang++19 probe-on/off tests and exact source reverse/forward
+patch replay PASS. Full PS5 core/title build, native TLS template
+128/memory15104/alignment32, nine package gates, 28-byte
+RPCS3PS5TEXT wrapper and byte-identical full ELF executable
+PT_LOAD mirror PASS. Diagnostic archive and hashes:
+`/home/callum/work/rsx0066-registerclasses-20261031/`.
+
+After complete PS5 process listing verified no title or
+launcher, guarded pair staging/activation and independently
+readback verified ELF/TLS/mirror. Saved original gate0 in
+`.before-rsx0066-20261031`. Booted GTA IV through Chiaki.
+Startup log MFC gate0/helper probes0; warmed game spawned
+*inside Niko's apartment facing the blue exit door*, the same
+indoor diagnostic location used in patch0065. No outdoors
+FPS A/B attempted. Two 45s captures both valid with
+zero new SPU compilations; indoor FPS at 60 cap.
+
+| Register offset band | Run1 words/handlers | Run2 words/handlers | Combined words | Combined direct handlers |
+| --- | --- | --- | ---: | ---: |
+| 0x1800–0x18FF | 61,025 / 56,874 | 63,334 / 59,337 | **124,359** | **116,211** |
+| 0x1700–0x17FF | 54,350 / 29 | 53,002 / 33 | **107,352** | **62** |
+| 0x1600–0x16FF | 40,088 / 40,088 | 43,563 / 43,563 | **83,651** | **83,651** |
+| 0x0300–0x03FF | 34,554 / 17,121 | 35,211 / 17,500 | **69,765** | **34,621** |
+| 0x1A00–0x1AFF | 34,932 / 34,932 | 34,798 / 34,798 | **69,730** | **69,730** |
+| 0x1F00–0x1FFF | 23,472 / 20,145 | 23,508 / 20,281 | **46,980** | **40,426** |
+
+Full sampled 256-bucket totals across both runs:
+**660,003 method words**, **435,865 direct handler calls**,
+top12 coverage ~**98.77%**, 26 valid histogram watchdog reports.
+`results/gta4-rsx-classes-20261031/rsx0066-indoor-combined.json`
+includes every top band and full per-capture output.
+
+Exact source `rpcs3/Emu/RSX/gcm_enums.h` examples:
+0x1740 `NV4097_SET_VERTEX_DATA_ARRAY_FORMAT`, 0x1680
+`NV4097_SET_VERTEX_DATA_ARRAY_OFFSET`, 0x1808
+`NV4097_SET_BEGIN_END`, 0x1814 `NV4097_DRAW_ARRAYS`,
+0x1824 `NV4097_DRAW_INDEX_ARRAY`, 0x1A00
+`NV4097_SET_TEXTURE_OFFSET`, and 0x1F00
+`NV4097_SET_TRANSFORM_CONSTANT`. These are names of registers
+within a 256-byte range, **not exact frequencies**.
+The 0x1700 bucket has 107,352 sampled words but only
+62 direct handler calls; potentially state-latch/format updates,
+not evidence of a high-CPU bottleneck. Investigate exact registers
+and value-change rates before modifying decode/dispatch.
+
+**Limitations:** periodic 1/512 sampling may alias with workload;
+top12 lists omit less active bands, though totals include all
+256 bins; class counters and RSXWORDS counters are independently
+drained across watchdog boundaries; method packet count is not
+exclusive handler CPU time or GPU utilization. This light
+indoor scene hits a 60FPS cap. No proven performance win.
+
+Closed title normally through Chiaki KB-RPCS3 > Options >
+Close Game. Independent completed process list confirmed both
+title and launcher absent. Guarded patch0066 rollback exited0.
+Independent full downloaded prior patch0064 control ELF load/TLS
+and mirror exact SHA256 verification PASS. Live sizes
+ELF117434056/mirror74605201. Patch0066
+stage ELF117438440/mirror74607761 retained; patch0065
+and patch0064 candidate stages also preserved. No game saves,
+config or caches changed. Both processes closed after test.
+
+**Suggested next phase:** targeted exact-register/value-change
+measurement on the 0x1700 range, or narrow sampled CPU timings
+of 0x1800/0x1600/0x1A00 handler paths. Require fresh outdoor
+matching and diagnostic-off controls before FPS claims.
+
+
+## Patch0067 PS5 CPU-time grouping: on-console results and safe return (2026-10-31)
+
+Lavavex commit https://github.com/lavavex/rpcs3/commit/5e0e0e613d218e2450b8b3c8adab4576286ca92c adds PPU/SPU/RSX CPU time to its performance overlay via thread_ctrl::get_cycles(). On KB's tested PS5, pthread_getcpuclockid(target) returns the calling thread's clock, so directly backporting it would risk bogus data. The current KB Utilities/Thread.cpp has a signal-based monitor: send SIGUSR1 to every registered RPCS3 worker, and each worker reports its own CLOCK_THREAD_CPUTIME_ID nanoseconds. Patch0067 reuses SAME snapshots (no extra signals) and aggregates ALL worker deltas into PPU, SPU, exact main rsx::thread, OTHER. Other includes SPU JIT compilation worker pool, graphics helpers and miscellaneous RPCS3 host threads, so avoid assuming that OTHER is idle CPU or that main-RSX is complete graphics-driver time. Percent is of one logical host hardware thread, not a physical core or game frame.
+
+Source patch: port/rpcs3-latest-patches/0067-PS5-report-exact-PPU-SPU-RSX-main-host-CPU-time.patch. Source original /home/callum/work/ps5cpu0067-original-20261031. Reversible patch replay PASS; GCC and Clang++19 C++20 tests PASS (port/tests/check-ps5-cpu-groups.py); synthetic legacy/exact parser tests PASS (port/tests/check-ps5-cpugroups-parser.py). Full PS5 build, TLS 128/15104/alignment32, ELF vs code-mirror full byte equality, all nine package checks PASS. Archived pair/hashes at /home/callum/work/ps5cpu0067-groups-20261031. Guarded stage/readback/activate verified no title or launcher processes, retained prior full gate0 pair, matched ELF load and TLS, code mirror SHA256. Loaded GTA IV normally via Chiaki and warmed SPU compilation before captures.
+
+| GTA IV apartment measurement (logical-core equivalents) | Run1 | Run2 | Mean |
+| --- | ---: | ---: | ---: |
+| PPU | 1.577 | 1.552 | **1.565** |
+| SPU | 3.883 | 3.827 | **3.855** |
+| Main RSX | 0.557 | 0.550 | **0.554** |
+| Other RPCS3 host threads | 0.083 | 0.082 | **0.083** |
+| All registered host threads | 6.093 | 6.005 | **6.049** |
+| FPS (60 cap) | 59.94 | 59.96 | **59.95** |
+
+Each capture had 45s, 11 FPS windows and 12 valid exact CPU time reports; both had zero new SPU compilations. Captures/logs and per-run parsed JSON are in results/gta4-ps5cpu-20261031/; combined result is ps5cpu0067-indoor-combined.json. The 60 cap prevents FPS inference. CPU time over parallel workers cannot distinguish which wait or worker gated frame delivery. Out-of-registry driver/kernel tasks are excluded.
+
+**Previously captured historical GTA IV CPU lower bounds (top14-only reports):** initial outdoor control ~23.42 FPS and total ~8.94 logical cores, printed PPU ~2.35/SPU ~5.52/main RSX ~0.89; return outdoor gate0 control ~27.54 FPS, total ~8.77, top14 PPU ~2.22/SPU ~5.45/main RSX ~0.92. Historical JSON: results/gta4-rsx-classes-20261031/ps5cpu0067-historical-top14-estimates.json. These older group values omit smaller workers and have integer rounding; differing outdoor scenes/Remote Play/boot state confound FPS attribution. The SPU group being busier is NOT itself evidence it controls the FPS.
+
+**Rollback:** Chiaki Games Home, selected KB-RPCS3, Options, Close Game. Complete independent process list verified title/launcher stopped, guarded rollback exit0. Independent download confirmed restored original ELF PT_LOAD and PT_TLS and exact original mirror SHA256; the title files now have original gate0 sizes (ELF 117434056 bytes; mirror 74605201 bytes). Both diagnostic stage files remain (0067 ELF 117438656 bytes; mirror 74608465 bytes). Final process list after rollback again confirms both processes closed. No user game data or config changed.
+
+**Next:** measure exact CPU groups in *uncapped, matched outdoor gameplay* with stable controls, and pair with PPU/SPU/RSX wait or per-frame critical-path evidence before making any performance optimization.
+
+
+## Patch0067 matched-area outdoor CPU experiment, completed 2026-10-31
+
+User positioned GTA IV Niko beside the hydrant/lamppost outdoors. Two 45s gate0 controls were captured in that exact user-set viewpoint; both passed 11 FPS reporting windows, gate0/helper probes0 and zero new SPU compilations. The PS5 title and launcher were stopped via Chiaki Home > KB-RPCS3 Options > Close Game, independently process-checked, and the staged patch0067 paired executable/mirror activated with guarded full SHA256 and ELF/TLS readback. The game rebooted into the apartment, and bounded Chiaki movement returned Niko to the same block; new viewpoint, precise Niko position, daylight and traffic were different. Both 45s patch0067 outdoor diagnostic runs passed, with 12 exact all-registered-thread CPU reports each and zero new SPU compiles.
+
+| Phase | Run 1 FPS | Run 2 FPS | Mean FPS | PPU host cores | SPU host cores | Main RSX host cores |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Original gate0 control, top14 group LOWER BOUNDS | 26.77 | 29.35 | **28.06** | 2.2815 | 5.5300 | 0.9425 |
+| Patch0067 exact all-worker groups | 28.20 | 29.32 | **28.76** | 2.2925 | 5.4435 | 0.9215 |
+
+Original gate0 total CPU ~8.937 logical host cores; patch0067 total ~8.737, OTHER ~0.0845. Control group sums omit registered workers outside top 14, but its overall total includes all registered workers. Patch0067 exact group counts include all registered workers, not kernel/driver threads outside the registry. Six guest SPU threads consume ~5.44 cores total and the main RSX worker ~0.92 of one logical host core. Summed CPU time does NOT say which thread waits on another or gates the next frame. Neither phase was FPS capped in the outdoor street. The control samples themselves differed by 2.58FPS. Nominal +0.70FPS diagnostic phase difference is NOT an optimization result: changed camera/position/traffic/lighting, load/boot conditions and sampling order make it noncausal.
+
+After capture, game closed normally via Chiaki; independent full PS5 process list confirmed no title or launcher. Guarded patch0067 rollback exit0; independently downloaded restored exact gate0 executable ELF load/TLS and code mirror exact SHA256 verification PASS. Patch0067 remains staged; old gate1 and diagnostic stages remain intact; no game data/config/cache changes.
+
+Data: results/gta4-ps5cpu-20261031/ps5cpu0067-outdoor-control-vs-diagnostic-20261031.json, four individual FPS/log files, ps5cpu0067-outdoor-control-groups.json and ps5cpu0067-outdoor-run1-groups.json / ps5cpu0067-outdoor-run2-groups.json. Next capture PPU/SPU/RSX per-frame dependency and waits in a same-angle outdoor test before any source-code optimization.
+
+
+## Patch0068 SPU reservation-wait timings, completed 2026-10-31
+
+Two stationary outdoor GTA IV 45s diagnostic captures passed, zero new SPU compiles, mean27.36FPS. Patch0068 exact invocation counts during the complete watchdog intervals: 453056 reservation callbacks (~4885/s), 342418 atomic waits (~3692/s), 115436 nested notify_all calls (~1245/s). Timed 1/128 samples separate CLOCK_MONOTONIC and CLOCK_THREAD_CPUTIME_ID: callback 3.141us wall/1.431us worker CPU; atomic wait 114.410us wall/9.627us worker CPU; notification 3.013us wall/1.397us worker CPU. Nested metrics cannot be summed as exclusive costs; samples include clock overhead and phase bias. Waiting time is predominantly non-running time, **not proof it limits FPS**. Native TLS lookup is already cheap. See GTA-IV-SPU-reservation-wait-timing-20261031.md. Guarded diagnostic rollback and independently verified original patch0064 gate0 ELF PT_LOAD/TLS + exact mirror SHA256 PASS, both processes CLOSED; 0068 retained in .spuwait0068-stage, no user configs or saves changed. Source patch count68 is NOT installed.
+
+
+## Patch0069: sampled SPU reservation page and notification origin (2026-10-31)
+
+After completed patch0068 elapsed-vs-CPU wait measurement, patch0069 measured which 4KiB guest page receives sampled SPU waits and which guest thread class initiates successful notification transitions. Two valid 45s stationary **outdoor** captures, FPS28.77 / 26.78, zero new SPU compiles. 1/128 per-host-worker/path samples: 2449 wait returns, 2279 successful notifier transitions; 0 table overflow. 2429 SPU wait samples (**99.18%**) on guest page **0x017F7000**; changed notifier flag2421, cleared reservation8; 256 PPU-origin and 1689 SPU-origin successful notify samples on same page. Other 20 wait samples on 0x017F8000. Note global notifier samples also include pages not in top8 wait list. Notification caller is not necessarily guest data writer or actual wake cause. Per-4s window wait count correlated positively with FPS (+0.663), but per-estimated-frame-normalized counts only weakly (+0.115). **No FPS speedup or actual frame-gating dependency is proven.** Next identify exact 128B line and guest data writer/callsites. Original patch0064 gate0 installed and independently ELF/TLS + mirror hash verified after guard rollback; game and launcher CLOSED; patch0069 safely staged. See GTA-IV-SPU-reservation-page-attribution-20261031.md.

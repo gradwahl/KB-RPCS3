@@ -1,0 +1,259 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Sat, 31 Oct 2026 02:00:00 +0000
+Subject: [PATCH] PS5: sample SPU reservation callback, wait and notifications
+
+Measure exact callback/wait/notification invocation counts with relaxed
+atomics; time only one of 128 calls per worker/event using monotonic
+and per-thread CPU clocks. Report cumulative counts every 4 seconds,
+not destructive exchange. Includes nested costs; no emulation changes.
+No helper SPU gate changes and no claimed FPS optimization.
+
+---
+diff --git a/rpcs3/Emu/Cell/SPUThread.cpp b/rpcs3/Emu/Cell/SPUThread.cpp
+--- a/rpcs3/Emu/Cell/SPUThread.cpp
++++ b/rpcs3/Emu/Cell/SPUThread.cpp
+@@ -1,8 +1,9 @@
+ #include "stdafx.h"
+ #ifdef __PROSPERO__
+ #include "Emu/RSX/ps5_worker_activity.h"
+ #include "ps5_mfc_meter.h"
++#include "ps5_spu_reswait.h"
+ #endif
+ #include "Utilities/JIT.h"
+ #include "Utilities/date_time.h"
+ #include "Emu/Memory/vm.h"
+@@ -6088,11 +6089,14 @@
+ #else
+ 					static thread_local bool s_tls_try_notify = false;
+ 					s_tls_try_notify = false;
+ 
+-					const auto wait_cb = mask1 != SPU_EVENT_LR ? nullptr : +[](u64 attempts) -> bool
+-					{
+-						const auto _this = static_cast<spu_thread*>(cpu_thread::get_current());
++                    const auto wait_cb = mask1 != SPU_EVENT_LR ? nullptr : +[](u64 attempts) -> bool
++                    {
++#ifdef __PROSPERO__
++                        const ps5_spu_reswait::scope ps5_cb_meter(ps5_spu_reswait::event::callback);
++#endif
++                        const auto _this = static_cast<spu_thread*>(cpu_thread::get_current());
+ 						AUDIT(_this->get_class() == thread_class::spu);
+ 
+ 						const auto old = +_this->state;
+ 
+@@ -6144,13 +6148,19 @@
+ 							_this->set_events(SPU_EVENT_LR);
+ 							return false;
+ 						}
+ 
+-						// Check other reservations in other threads
+-						lv2_obj::notify_all();
+-
+-						return true;
+-					};
++                        // Check other reservations in other threads.
++#ifdef __PROSPERO__
++                        {
++                            const ps5_spu_reswait::scope ps5_notify_meter(ps5_spu_reswait::event::callback_notify);
++                            lv2_obj::notify_all();
++                        }
++#else
++                        lv2_obj::notify_all();
++#endif
++                        return true;
++                    };
+ 
+ 					if (auto [wait_var, flag_val] = vm::reservation_notifier_begin_wait(_raddr, rtime); wait_var)
+ 					{
+ 						if (!cmp_rdata(rdata, *resrv_mem))
+@@ -6159,19 +6169,29 @@
+ 							set_events(SPU_EVENT_LR);
+ 						}
+ 						else if (check_cache_line_waiter())
+ 						{
+-							atomic_wait_engine::set_one_time_use_wait_callback(wait_cb);
+-							utils::bless<atomic_t<u32>>(&wait_var->raw().wait_flag)->wait(flag_val, atomic_wait_timeout{100'000});
++                            atomic_wait_engine::set_one_time_use_wait_callback(wait_cb);
++#ifdef __PROSPERO__
++                            {
++                                const ps5_spu_reswait::scope ps5_wait_meter(ps5_spu_reswait::event::atomic_wait);
++                                utils::bless<atomic_t<u32>>(&wait_var->raw().wait_flag)->wait(flag_val, atomic_wait_timeout{100'000});
++                            }
++#else
++                            utils::bless<atomic_t<u32>>(&wait_var->raw().wait_flag)->wait(flag_val, atomic_wait_timeout{100'000});
++#endif
+ 						}
+ 
+ 						vm::reservation_notifier_end_wait(*wait_var);
+ 					}
+ 
+-					if (s_tls_try_notify && vm::reservation_notifier_count(_raddr, rtime) && vm::reservation_acquire(_raddr) == rtime)
+-					{
+-						vm::reservation_notifier_notify(_raddr, rtime);
+-					}
++                    if (s_tls_try_notify && vm::reservation_notifier_count(_raddr, rtime) && vm::reservation_acquire(_raddr) == rtime)
++                    {
++#ifdef __PROSPERO__
++                        const ps5_spu_reswait::scope ps5_post_notify_meter(ps5_spu_reswait::event::post_wait_notify);
++#endif
++                        vm::reservation_notifier_notify(_raddr, rtime);
++                    }
+ #endif
+ 				}
+ 
+ 				continue;
+diff --git a/rpcs3/ps5/ps5_frontend.cpp b/rpcs3/ps5/ps5_frontend.cpp
+--- a/rpcs3/ps5/ps5_frontend.cpp
++++ b/rpcs3/ps5/ps5_frontend.cpp
+@@ -24,8 +24,9 @@
+ #include "Emu/RSX/ps5_frame_trace.h"
+ #include "Emu/RSX/ps5_worker_activity.h"
+ #include "Emu/RSX/ps5_rsx_words.h"
+ #include "Emu/Cell/ps5_mfc_meter.h"
++#include "Emu/Cell/ps5_spu_reswait.h"
+ #endif
+ #include "Emu/RSX/Null/NullGSRender.h"
+ #include "Emu/RSX/VK/VKGSRender.h"
+ #include "Emu/Audio/Null/NullAudioBackend.h"
+@@ -979,8 +980,22 @@
+ 					last_vblank = vblank;
+ 					sys_log.notice("PS5 TIMING: guest/host %.3f, vblank %.1f/s", guest_ratio, vblank_hz);
+ 				}
+ 				sys_log.notice("PS5 CPU: %s", ps5_thread_cpu_report(window_ms * 1'000'000, 14));
++
++                // PS5SPUWAIT: cumulative counters so a callback in progress
++                // is never lost to a destructive exchange. Parse interval
++                // deltas in the capture tool; nested stages are NOT exclusive.
++                for (unsigned i = 0; i < ps5_spu_reswait::event_count; ++i)
++                {
++                    const auto v = ps5_spu_reswait::take(static_cast<ps5_spu_reswait::event>(i));
++                    sys_log.notice("PS5 SPUWAIT: v1 event %u period 128 calls %llu samples %llu wall_ns %llu cpu_ns %llu wall_max_ns %llu",
++                        i, static_cast<unsigned long long>(v.calls),
++                        static_cast<unsigned long long>(v.samples),
++                        static_cast<unsigned long long>(v.wall_ns),
++                        static_cast<unsigned long long>(v.cpu_ns),
++                        static_cast<unsigned long long>(v.wall_max_ns));
++                }
+ 
+ #ifdef __PROSPERO__
+                 // Sparse cross-thread CPU timeline: drain the fixed ring on the
+                 // watchdog only. Never log or allocate on the guest/RSX threads.
+diff --git a/rpcs3/Emu/Cell/ps5_spu_reswait.h b/rpcs3/Emu/Cell/ps5_spu_reswait.h
+new file mode 100644
+--- /dev/null
++++ b/rpcs3/Emu/Cell/ps5_spu_reswait.h
+@@ -0,0 +1,114 @@
++#pragma once
++// PS5 diagnostic only: sample CPU vs elapsed time at SPU reservation waits.
++// Only this sampler's own atomics/clocks are touched, never guest state.
++// sampled calls: 1/128 per host thread and event type; counts are exact
++// atomic increments, times represent sampled calls and are NOT exclusive.
++#include <array>
++#include <atomic>
++#include <cstdint>
++#include <ctime>
++
++namespace ps5_spu_reswait
++{
++    enum class event : unsigned
++    {
++        callback,
++        atomic_wait,
++        callback_notify,
++        post_wait_notify,
++        count
++    };
++    constexpr unsigned sample_period = 128;
++    constexpr unsigned event_count = static_cast<unsigned>(event::count);
++
++    struct data
++    {
++        std::atomic<std::uint64_t> calls{0};
++        std::atomic<std::uint64_t> samples{0};
++        std::atomic<std::uint64_t> wall_ns{0};
++        std::atomic<std::uint64_t> cpu_ns{0};
++        std::atomic<std::uint64_t> wall_max_ns{0};
++    };
++    inline std::array<data, event_count> g_data{};
++
++    inline std::uint64_t ns(const timespec& t) noexcept
++    {
++        return static_cast<std::uint64_t>(t.tv_sec) * 1'000'000'000ull +
++            static_cast<std::uint64_t>(t.tv_nsec);
++    }
++
++    class scope
++    {
++        data* m_data;
++        timespec m_wall{};
++        timespec m_cpu{};
++        bool m_sampled = false;
++
++    public:
++        explicit scope(event e) noexcept
++            : m_data(&g_data[static_cast<unsigned>(e)])
++        {
++            // Per-thread first call and every 128th call. Incrementing
++            // this slot provides an *exact*, not sampling-extrapolated,
++            // invocation count at the cost of one relaxed atomic.
++            m_data->calls.fetch_add(1, std::memory_order_relaxed);
++            static thread_local std::uint32_t s_phase[event_count]{};
++            const unsigned index = static_cast<unsigned>(e);
++            if (((s_phase[index]++) & (sample_period - 1)) != 0)
++                return;
++            if (clock_gettime(CLOCK_MONOTONIC, &m_wall) != 0 ||
++                clock_gettime(CLOCK_THREAD_CPUTIME_ID, &m_cpu) != 0)
++                return;
++            m_sampled = true;
++        }
++
++        ~scope() noexcept
++        {
++            if (!m_sampled)
++                return;
++            timespec wall{}, cpu{};
++            if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu) != 0 ||
++                clock_gettime(CLOCK_MONOTONIC, &wall) != 0)
++                return;
++            const auto start_wall = ns(m_wall);
++            const auto start_cpu = ns(m_cpu);
++            const auto end_wall = ns(wall);
++            const auto end_cpu = ns(cpu);
++            const auto wall_delta = end_wall >= start_wall ? end_wall - start_wall : 0;
++            const auto cpu_delta = end_cpu >= start_cpu ? end_cpu - start_cpu : 0;
++            m_data->samples.fetch_add(1, std::memory_order_relaxed);
++            m_data->wall_ns.fetch_add(wall_delta, std::memory_order_relaxed);
++            m_data->cpu_ns.fetch_add(cpu_delta, std::memory_order_relaxed);
++            auto prev = m_data->wall_max_ns.load(std::memory_order_relaxed);
++            while (prev < wall_delta &&
++                   !m_data->wall_max_ns.compare_exchange_weak(
++                       prev, wall_delta, std::memory_order_relaxed))
++            {}
++        }
++
++        scope(const scope&) = delete;
++        scope& operator=(const scope&) = delete;
++    };
++
++    struct snapshot
++    {
++        std::uint64_t calls;
++        std::uint64_t samples;
++        std::uint64_t wall_ns;
++        std::uint64_t cpu_ns;
++        std::uint64_t wall_max_ns;
++    };
++
++    inline snapshot take(event e) noexcept
++    {
++        auto& x = g_data[static_cast<unsigned>(e)];
++        // Snapshots may straddle a worker's scoped destructor and are
++        // cumulative (not destructively reset). Compare deltas between
++        // successive 4-second reports to avoid losing in-flight work.
++        return {x.calls.load(std::memory_order_relaxed),
++                x.samples.load(std::memory_order_relaxed),
++                x.wall_ns.load(std::memory_order_relaxed),
++                x.cpu_ns.load(std::memory_order_relaxed),
++                x.wall_max_ns.load(std::memory_order_relaxed)};
++    }
++}

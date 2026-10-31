@@ -1,0 +1,139 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Sat, 31 Oct 2026 01:04:00 +0000
+Subject: [PATCH] PS5: report all registered host CPU time by emulation group
+
+Adapt lavavex/rpcs3 5e0e0e6's CPU group idea to KB's existing
+signal-based thread CPU-time monitor. On tested PS5 systems,
+pthread_getcpuclockid(other) returns the caller clock; it is unsafe to
+copy the overlay's get_cycles approach directly. Reuse already sampled
+CLOCK_THREAD_CPUTIME_ID values, classify PPU and SPU name prefixes and
+the exact main rsx::thread, with all other registered host threads
+separate. All worker totals included, not just top-14 log entries.
+Print exact nanoseconds and counts alongside existing PS5 CPU rows.
+The CPU monitor remains a diagnostic: no changes to the guest,
+scheduling, emulation or renderer. No FPS claims.
+
+---
+diff --git a/Utilities/Thread.cpp b/Utilities/Thread.cpp
+--- a/Utilities/Thread.cpp
++++ b/Utilities/Thread.cpp
+@@ -2862,8 +2862,9 @@
+ #endif
+ }
+ 
+ #ifdef __PROSPERO__
++#include "rpcs3/ps5/ps5_cpu_groups.h"
+ // PS5 CPU monitor: every RPCS3 thread's CPU time, for ps5_thread_cpu_report() (rpcs3/ps5/ps5_frontend.cpp
+ // logs it every few seconds while a game runs). On the console pthread_getcpuclockid() hands back the
+ // *calling* thread's clock (14), so another thread's time can't be read directly: the monitor sends each
+ // thread SIGUSR1 and the thread stores its own CLOCK_THREAD_CPUTIME_ID in its slot.
+@@ -2955,8 +2956,9 @@
+ 			::pthread_kill(e.thread, SIGUSR1);
+ 	}
+ 	std::this_thread::sleep_for(std::chrono::milliseconds(30));
+ 	std::vector<std::pair<u64, std::string>> rows;
++	ps5_cpu_groups::totals groups;
+ 	u64 total = 0;
+ 	{
+ 		std::lock_guard lock(g_ps5_threads_mutex);
+ 		for (auto& e : g_ps5_threads)
+@@ -2964,11 +2966,17 @@
+ 			const u64 now = e.cpu_ns->load(std::memory_order_relaxed);
+ 			const u64 used = now > e.last_ns ? now - e.last_ns : 0;
+ 			e.last_ns = now;
+ 			e.last_pct = static_cast<u32>(used * 100 / std::max<u64>(window_ns, 1));
+-			total += used;
+-			if (used)
+-				rows.emplace_back(used, *e.name->load());
++            total += used;
++            // Count every registered host thread, not just top-14.
++            // Reuse the SAME signal snapshots already used for PS5 CPU;
++            // do not call pthread_getcpuclockid(other), which returns
++            // this monitor's clock on the tested PS5 system.
++            const auto thread_name = *e.name->load();
++            groups.add(thread_name, used);
++            if (used)
++                rows.emplace_back(used, thread_name);
+ 		}
+ 	}
+ 	std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+ 	{
+@@ -2976,9 +2984,22 @@
+ 		g_ps5_top_names.clear();
+ 		for (usz i = 0; i < rows.size() && i < 6; i++)
+ 			g_ps5_top_names.push_back(rows[i].second);
+ 	}
+-	std::string out = fmt::format("total %u%%", total * 100 / std::max<u64>(window_ns, 1));
++	// Exact ns totals from ALL registered workers. Windows are 4s-ish,
++    // asynchronous snapshots with ~30ms signal wait and are not
++    // guest critical-path timings, GPU time, or per-frame work.
++    std::string out = fmt::format("total %u%%", total * 100 / std::max<u64>(window_ns, 1));
++    fmt::append(out,
++        " | group_ns window %llu ppu %llu spu %llu rsx_main %llu other %llu"
++        " threads_ppu %u threads_spu %u threads_rsx_main %u threads_other %u",
++        static_cast<unsigned long long>(window_ns),
++        static_cast<unsigned long long>(groups.ppu_ns),
++        static_cast<unsigned long long>(groups.spu_ns),
++        static_cast<unsigned long long>(groups.rsx_main_ns),
++        static_cast<unsigned long long>(groups.other_ns),
++        groups.ppu_threads, groups.spu_threads,
++        groups.rsx_main_threads, groups.other_threads);
+ 	for (usz i = 0; i < rows.size() && i < top; i++)
+ 		fmt::append(out, " | %s %u%%", rows[i].second, rows[i].first * 100 / std::max<u64>(window_ns, 1));
+ 	return out;
+ }
+diff --git a/rpcs3/ps5/ps5_cpu_groups.h b/rpcs3/ps5/ps5_cpu_groups.h
+new file mode 100644
+--- /dev/null
++++ b/rpcs3/ps5/ps5_cpu_groups.h
+@@ -0,0 +1,49 @@
++#pragma once
++// Host CPU-time accounting from the existing PS5 signal-based monitor.
++// Every percentage is a fraction of ONE logical CPU thread, not of
++// a guest PS3 CPU or a single frame. Never use this for critical paths.
++#include <cstdint>
++#include <string_view>
++
++namespace ps5_cpu_groups
++{
++    enum class kind { ppu, spu, rsx_main, other };
++
++    constexpr kind classify(std::string_view name) noexcept
++    {
++        if (name.starts_with("PPU[")) return kind::ppu;
++        if (name.starts_with("SPU[")) return kind::spu;
++        // Other renderer, offload and graphics driver tasks remain in
++        // OTHER until their identity and ownership are verified.
++        if (name == "rsx::thread") return kind::rsx_main;
++        return kind::other;
++    }
++
++    struct totals
++    {
++        std::uint64_t ppu_ns = 0;
++        std::uint64_t spu_ns = 0;
++        std::uint64_t rsx_main_ns = 0;
++        std::uint64_t other_ns = 0;
++        std::uint32_t ppu_threads = 0;
++        std::uint32_t spu_threads = 0;
++        std::uint32_t rsx_main_threads = 0;
++        std::uint32_t other_threads = 0;
++
++        void add(std::string_view name, std::uint64_t cpu_ns) noexcept
++        {
++            switch (classify(name))
++            {
++                case kind::ppu: ppu_ns += cpu_ns; ++ppu_threads; break;
++                case kind::spu: spu_ns += cpu_ns; ++spu_threads; break;
++                case kind::rsx_main: rsx_main_ns += cpu_ns; ++rsx_main_threads; break;
++                case kind::other: other_ns += cpu_ns; ++other_threads; break;
++            }
++        }
++
++        constexpr std::uint64_t all_ns() const noexcept
++        {
++            return ppu_ns + spu_ns + rsx_main_ns + other_ns;
++        }
++    };
++}

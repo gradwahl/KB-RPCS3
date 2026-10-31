@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Sat, 31 Oct 2026 03:42:00 +0000
+Subject: [PATCH] PS5: opt-in bounded Vulkan fence wait for CPU plan
+
+Default OFF keeps existing zero-timeout busy poll byte-for-byte.
+Explicit diagnostic ON polls 64 statuses then issues a 100us Vulkan
+wait, preserving level-triggered completion, timeouts and errors.
+No new guest synchronization or production behavior change.
+---
+diff --git a/rpcs3/Emu/RSX/VK/vkutils/sync.cpp b/rpcs3/Emu/RSX/VK/vkutils/sync.cpp
+--- a/rpcs3/Emu/RSX/VK/vkutils/sync.cpp
++++ b/rpcs3/Emu/RSX/VK/vkutils/sync.cpp
+@@ -3,8 +3,9 @@
+ #include "commands.h"
+ #include "device.h"
+ #include "garbage_collector.h"
+ #include "sync.h"
++#include "ps5_vk_fence_sleep.h"
+ #include "shared.h"
+ #ifdef __PROSPERO__
+ #include "Emu/RSX/ps5_frame_trace.h"
+ #endif
+@@ -585,13 +586,37 @@
+ 			return vkWaitForFences(*g_render_device, 1, &pFence->handle, VK_FALSE, timeout * 1000ull);
+ 		}
+ 		else
+ 		{
++#if defined(__PROSPERO__) && PS5_VK_FENCE_TIMED_WAIT
++			unsigned pending_polls = 0;
++#endif
+ 			while (auto status = vkGetFenceStatus(*g_render_device, pFence->handle))
+ 			{
+ 				switch (status)
+ 				{
+ 				case VK_NOT_READY:
++#if defined(__PROSPERO__) && PS5_VK_FENCE_TIMED_WAIT
++					// This OPTIONAL policy is only for fence waits whose
++					// caller requested "infinite" completion. A fence is
++					// level-triggered; if signaled between the poll and
++					// WaitForFences, the Vulkan API returns immediately.
++					// Never treat VK_TIMEOUT as completion or lose errors.
++					if (++pending_polls >= 64)
++					{
++						pending_polls = 0;
++						const auto result = vkWaitForFences(*g_render_device,
++							1, &pFence->handle, VK_FALSE, 100'000ull);
++						if (result == VK_SUCCESS)
++							return VK_SUCCESS;
++						if (result != VK_TIMEOUT)
++						{
++							die_with_error(result);
++							return result;
++						}
++						continue;
++					}
++#endif
+ 					utils::pause();
+ 					continue;
+ 				default:
+ 					die_with_error(status);
+diff --git a/rpcs3/Emu/RSX/VK/vkutils/ps5_vk_fence_sleep.h b/rpcs3/Emu/RSX/VK/vkutils/ps5_vk_fence_sleep.h
+new file mode 100644
+--- /dev/null
++++ b/rpcs3/Emu/RSX/VK/vkutils/ps5_vk_fence_sleep.h
+@@ -0,0 +1,15 @@
++#pragma once
++// CPU optimisation plan, Section 2: PS5 Vulkan zero-timeout fence policy.
++// Deliberately OFF by default. The original busy-poll path remains
++// completely unchanged in normal PS5/desktop builds.
++//
++// When separately enabled in a diagnostic build, after 64 VK_NOT_READY
++// polls, let the Vulkan driver block for up to 100 microseconds.
++// This is not approved as a production default until sustained A/B/A
++// gameplay verifies p95/p99, device loss and shutdown behaviour.
++#ifndef PS5_VK_FENCE_TIMED_WAIT
++#define PS5_VK_FENCE_TIMED_WAIT 0
++#endif
++#if PS5_VK_FENCE_TIMED_WAIT != 0 && PS5_VK_FENCE_TIMED_WAIT != 1
++#error PS5_VK_FENCE_TIMED_WAIT must be 0 or 1
++#endif

@@ -1,0 +1,192 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Sat, 31 Oct 2026 00:11:00 +0000
+Subject: [PATCH] PS5: diagnose FIFO method work with sparse per-run counts
+
+A single run_FIFO call can decode and dispatch many register words. The
+prior first-read sampler did not reveal actual method-loop workload.
+Count iterations, true direct method callbacks and flattener-suppressed
+registers only in 1/512 method-bearing invocations. All dispatch paths
+remain verbatim. Per-sampled-run aggregates are drained by watchdog
+every ~4 seconds; no per-method clocks, locks, allocations or logs.
+
+This is an OFFLINE DIAGNOSTIC until runtime validated; no FPS
+optimization is claimed. Sampling is periodic and may be phase biased.
+The counts are RSX CPU loop work, not GPU method counts/critical path.
+
+---
+diff --git a/rpcs3/Emu/RSX/RSXFIFO.cpp b/rpcs3/Emu/RSX/RSXFIFO.cpp
+--- a/rpcs3/Emu/RSX/RSXFIFO.cpp
++++ b/rpcs3/Emu/RSX/RSXFIFO.cpp
+@@ -4,8 +4,9 @@
+ #include "RSXFIFO.h"
+ #include "RSXThread.h"
+ #ifdef __PROSPERO__
+ #include "ps5_rsx_perf.h"
++#include "ps5_rsx_words.h"
+ 
+ extern "C" s64 rpcs3ps5_tune(int key);
+ extern "C" int scePthreadYield(void);
+ static constexpr int PS5_TUNE_RSX_FIFO_YIELD = 11;
+@@ -921,10 +922,21 @@
+ 			// Update performance counters with time spent in idle mode
+ 			performance_counters.idle_time += (get_system_time() - performance_counters.FIFO_idle_timestamp);
+ 		}
+ 
++#ifdef __PROSPERO__
++        // Only method-bearing calls reach this path. All actual dispatch,
++        // flattener and FIFO state transitions are preserved verbatim.
++        const bool ps5_sample_method_words = ps5_rsx_words::selected();
++        u32 ps5_method_loop_words = 0;
++        u32 ps5_method_handlers = 0;
++        u32 ps5_flattened_skips = 0;
++#endif
+ 		do
+ 		{
++#ifdef __PROSPERO__
++            if (ps5_sample_method_words) ++ps5_method_loop_words;
++#endif
+ 			if (capture_current_frame) [[unlikely]]
+ 			{
+ 				const u32 reg = (command.reg & 0xfffc) >> 2;
+ 				const u32 value = command.value;
+@@ -1014,8 +1026,11 @@
+ 				}
+ 
+ 				if (command.reg == FIFO::FIFO_DISABLED_COMMAND)
+ 				{
++#ifdef __PROSPERO__
++                    if (ps5_sample_method_words) ++ps5_flattened_skips;
++#endif
+ 					// Optimized away
+ 					continue;
+ 				}
+ 			}
+@@ -1033,8 +1048,11 @@
+ 			}
+ 
+ 			if (auto method = methods[reg])
+ 			{
++#ifdef __PROSPERO__
++                if (ps5_sample_method_words) ++ps5_method_handlers;
++#endif
+ 				method(m_ctx, reg, value);
+ 
+ 				if (state & cpu_flag::again)
+ 				{
+@@ -1049,7 +1067,11 @@
+ 			}
+ 		}
+ 		while (fifo_ctrl->read_unsafe(command));
+ 
++#ifdef __PROSPERO__
++        if (ps5_sample_method_words)
++            ps5_rsx_words::record(ps5_method_loop_words, ps5_method_handlers, ps5_flattened_skips);
++#endif
+ 		fifo_ctrl->sync_get();
+ 	}
+ }
+diff --git a/rpcs3/ps5/ps5_frontend.cpp b/rpcs3/ps5/ps5_frontend.cpp
+--- a/rpcs3/ps5/ps5_frontend.cpp
++++ b/rpcs3/ps5/ps5_frontend.cpp
+@@ -22,8 +22,9 @@
+ #ifdef __PROSPERO__
+ #include "Emu/RSX/ps5_rsx_perf.h"
+ #include "Emu/RSX/ps5_frame_trace.h"
+ #include "Emu/RSX/ps5_worker_activity.h"
++#include "Emu/RSX/ps5_rsx_words.h"
+ #include "Emu/Cell/ps5_mfc_meter.h"
+ #endif
+ #include "Emu/RSX/Null/NullGSRender.h"
+ #include "Emu/RSX/VK/VKGSRender.h"
+@@ -1099,8 +1100,21 @@
+                             static_cast<unsigned long long>(zero));
+                     if (const auto overflow = ps5_worker_activity::slot_overflow.exchange(0))
+                         sys_log.notice("PS5 WORKER2: lost_spu_slot_allocations %llu",
+                             static_cast<unsigned long long>(overflow));
++                }
++#endif
++#if defined(__PROSPERO__) && PS5_RSX_WORDS_ACTIVE
++                // Counts in sampled method-bearing run_FIFO calls, not all
++                // guest method packets and not CPU/GPU time per frame.
++                {
++                    const auto probe = ps5_rsx_words::take();
++                    sys_log.notice("PS5 RSXWORDS: every 512 method_runs %llu method_loop_words %llu handler_calls %llu flattened_skips %llu max_words_per_run %u",
++                        static_cast<unsigned long long>(probe.sampled_runs),
++                        static_cast<unsigned long long>(probe.loop_words),
++                        static_cast<unsigned long long>(probe.handler_calls),
++                        static_cast<unsigned long long>(probe.flattened_skips),
++                        probe.max_words_in_run);
+                 }
+ #endif
+ #if defined(__PROSPERO__) && PS5_RSX_PERF_ACTIVE
+ 				{
+diff --git a/rpcs3/Emu/RSX/ps5_rsx_words.h b/rpcs3/Emu/RSX/ps5_rsx_words.h
+new file mode 100644
+--- /dev/null
++++ b/rpcs3/Emu/RSX/ps5_rsx_words.h
+@@ -0,0 +1,64 @@
++// PS5-only diagnostic: sampled actual RSX method loop workload.
++// No guest command, packet, draw or scheduling decisions depend on counts.
++#pragma once
++#ifdef __PROSPERO__
++#include <atomic>
++#include <cstdint>
++
++#ifndef PS5_RSX_WORDS_ACTIVE
++#define PS5_RSX_WORDS_ACTIVE 1
++#endif
++
++namespace ps5_rsx_words
++{
++    inline constexpr std::uint32_t sample_mask = 511;
++
++    struct counters
++    {
++        std::atomic<std::uint64_t> sampled_runs{0};
++        std::atomic<std::uint64_t> loop_words{0};
++        std::atomic<std::uint64_t> handler_calls{0};
++        std::atomic<std::uint64_t> flattened_skips{0};
++        std::atomic<std::uint32_t> max_words_in_run{0};
++    };
++    inline counters data{};
++
++    // Only called for method-bearing invocations, on the RSX thread.
++    // This periodic sample may have workload-phase bias; it is not a
++    // complete command count or a GPU timer.
++    inline bool selected() noexcept
++    {
++        if constexpr (!PS5_RSX_WORDS_ACTIVE) return false;
++        static thread_local std::uint32_t n = 0;
++        return (++n & sample_mask) == 0;
++    }
++
++    inline void record(std::uint32_t words, std::uint32_t handled,
++                       std::uint32_t skipped) noexcept
++    {
++        data.sampled_runs.fetch_add(1, std::memory_order_relaxed);
++        data.loop_words.fetch_add(words, std::memory_order_relaxed);
++        data.handler_calls.fetch_add(handled, std::memory_order_relaxed);
++        data.flattened_skips.fetch_add(skipped, std::memory_order_relaxed);
++        auto max = data.max_words_in_run.load(std::memory_order_relaxed);
++        while (words > max && !data.max_words_in_run.compare_exchange_weak(
++               max, words, std::memory_order_relaxed, std::memory_order_relaxed)) {}
++    }
++    struct snapshot
++    {
++        std::uint64_t sampled_runs, loop_words, handler_calls, flattened_skips;
++        std::uint32_t max_words_in_run;
++    };
++    // Approximate 4s windows. Reporter and RSX thread can cross boundaries.
++    inline snapshot take() noexcept
++    {
++        return {
++            data.sampled_runs.exchange(0, std::memory_order_relaxed),
++            data.loop_words.exchange(0, std::memory_order_relaxed),
++            data.handler_calls.exchange(0, std::memory_order_relaxed),
++            data.flattened_skips.exchange(0, std::memory_order_relaxed),
++            data.max_words_in_run.exchange(0, std::memory_order_relaxed)
++        };
++    }
++}
++#endif

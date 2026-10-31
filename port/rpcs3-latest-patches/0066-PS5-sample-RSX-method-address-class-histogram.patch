@@ -1,0 +1,165 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Sat, 31 Oct 2026 00:35:00 +0000
+Subject: [PATCH] PS5: sampled RSX method-address range histogram
+
+Extend diagnostic-only patch0065 to record 256-byte register-address
+bucket counts for the same 1/512 sampled method-bearing FIFO calls.
+Only actual decoded loop register words and direct handlers are
+counted. Per-register hot path increments relaxed atomics only in the
+selected calls; watchdog drains 256 buckets and ranks top twelve.
+No guest-state, method dispatch, FIFO control, timing or DMA change.
+Counts may be phase biased; no FPS optimization is claimed.
+
+---
+diff --git a/rpcs3/Emu/RSX/ps5_rsx_words.h b/rpcs3/Emu/RSX/ps5_rsx_words.h
+--- a/rpcs3/Emu/RSX/ps5_rsx_words.h
++++ b/rpcs3/Emu/RSX/ps5_rsx_words.h
+@@ -3,8 +3,9 @@
+ #pragma once
+ #ifdef __PROSPERO__
+ #include <atomic>
+ #include <cstdint>
++#include <array>
+ 
+ #ifndef PS5_RSX_WORDS_ACTIVE
+ #define PS5_RSX_WORDS_ACTIVE 1
+ #endif
+@@ -61,4 +62,72 @@
+         };
+     }
+ }
+ #endif
++
++#ifdef __PROSPERO__
++#ifndef PS5_RSX_CLASS_ACTIVE
++#define PS5_RSX_CLASS_ACTIVE 1
++#endif
++namespace ps5_rsx_class
++{
++    // Decode register = (FIFO word reg & 0xffff) >> 2.
++    // Bucket of 64 registers corresponds to a 256-byte RSX address band.
++    inline constexpr unsigned count = 256;
++    inline constexpr unsigned top_count = 12;
++    struct bucket
++    {
++        std::atomic<std::uint64_t> words{0};
++        std::atomic<std::uint64_t> handlers{0};
++    };
++    inline std::array<bucket, count> data{};
++
++    inline void record_word(unsigned reg) noexcept
++    {
++        if constexpr (!PS5_RSX_CLASS_ACTIVE) return;
++        data[(reg >> 6) & 255u].words.fetch_add(1, std::memory_order_relaxed);
++    }
++    inline void record_handler(unsigned reg) noexcept
++    {
++        if constexpr (!PS5_RSX_CLASS_ACTIVE) return;
++        data[(reg >> 6) & 255u].handlers.fetch_add(1, std::memory_order_relaxed);
++    }
++    struct hot_bucket
++    {
++        unsigned index = 0;
++        std::uint64_t words = 0;
++        std::uint64_t handlers = 0;
++    };
++    struct summary
++    {
++        std::uint64_t words = 0, handlers = 0;
++        unsigned nonempty = 0;
++        std::array<hot_bucket, top_count> hottest{};
++    };
++
++    // Watchdog only. Independent exchange per bucket may straddle a
++    // running RSX invocation; totals need not line up exactly with
++    // the separately drained RSXWORDS report in the same interval.
++    inline summary take() noexcept
++    {
++        summary result{};
++        for (unsigned i = 0; i < count; ++i)
++        {
++            const auto words = data[i].words.exchange(0, std::memory_order_relaxed);
++            const auto handlers = data[i].handlers.exchange(0, std::memory_order_relaxed);
++            result.words += words;
++            result.handlers += handlers;
++            if (!words && !handlers) continue;
++            ++result.nonempty;
++            if (words <= result.hottest[top_count-1].words) continue;
++            unsigned pos = top_count - 1;
++            while (pos && words > result.hottest[pos-1].words)
++            {
++                result.hottest[pos] = result.hottest[pos-1];
++                --pos;
++            }
++            result.hottest[pos] = {i, words, handlers};
++        }
++        return result;
++    }
++}
++#endif
+diff --git a/rpcs3/Emu/RSX/RSXFIFO.cpp b/rpcs3/Emu/RSX/RSXFIFO.cpp
+--- a/rpcs3/Emu/RSX/RSXFIFO.cpp
++++ b/rpcs3/Emu/RSX/RSXFIFO.cpp
+@@ -1035,8 +1035,14 @@
+ 				}
+ 			}
+ 
+ 			const u32 reg = (command.reg & 0xffff) >> 2;
++#ifdef __PROSPERO__
++            // Same 1/512 method-bearing selection as patch0065; no new
++            // timer/lookup/dispatch or extra work on the unsampled path.
++            if (ps5_sample_method_words)
++                ps5_rsx_class::record_word(reg);
++#endif
+ 			const u32 value = command.value;
+ 
+ 			m_ctx->register_state->decode(reg, value);
+ 
+@@ -1049,9 +1055,13 @@
+ 
+ 			if (auto method = methods[reg])
+ 			{
+ #ifdef __PROSPERO__
+-                if (ps5_sample_method_words) ++ps5_method_handlers;
++                if (ps5_sample_method_words)
++                {
++                    ++ps5_method_handlers;
++                    ps5_rsx_class::record_handler(reg);
++                }
+ #endif
+ 				method(m_ctx, reg, value);
+ 
+ 				if (state & cpu_flag::again)
+diff --git a/rpcs3/ps5/ps5_frontend.cpp b/rpcs3/ps5/ps5_frontend.cpp
+--- a/rpcs3/ps5/ps5_frontend.cpp
++++ b/rpcs3/ps5/ps5_frontend.cpp
+@@ -1113,8 +1113,28 @@
+                         static_cast<unsigned long long>(probe.loop_words),
+                         static_cast<unsigned long long>(probe.handler_calls),
+                         static_cast<unsigned long long>(probe.flattened_skips),
+                         probe.max_words_in_run);
++                }
++#endif
++#if defined(__PROSPERO__) && PS5_RSX_CLASS_ACTIVE
++                // Sparse sampled register-address histogram (256B buckets).
++                // Ranking on watchdog thread only. No guest-affecting logic.
++                {
++                    const auto classes = ps5_rsx_class::take();
++                    sys_log.notice("PS5 RSXCLASS2: bucket_bytes 256 words %llu handlers %llu nonempty %u top_limit 12",
++                        static_cast<unsigned long long>(classes.words),
++                        static_cast<unsigned long long>(classes.handlers),
++                        classes.nonempty);
++                    for (unsigned rank = 0; rank < ps5_rsx_class::top_count; ++rank)
++                    {
++                        const auto& hot = classes.hottest[rank];
++                        if (!hot.words) break;
++                        sys_log.notice("PS5 RSXCLASS: rank %u offset 0x%04x words %llu handlers %llu",
++                            rank + 1, hot.index << 8,
++                            static_cast<unsigned long long>(hot.words),
++                            static_cast<unsigned long long>(hot.handlers));
++                    }
+                 }
+ #endif
+ #if defined(__PROSPERO__) && PS5_RSX_PERF_ACTIVE
+ 				{

@@ -1007,6 +1007,8 @@ private:
 			const rpcs3ps5::Setting &setting = all[page_rows_[static_cast<std::size_t>(page_sel_)]];
 			list.line(140, 890, W - 140, 890, 1.5f, kWhite.with_alpha(0.3f));
 			std::string info = "Default: " + (setting.kind == 'b' ? std::string(setting.def == "true" ? "On" : "Off") : setting.def);
+			if (setting.path == "Video|Frame Generation (MihawkGen)")
+				info += "  \xC2\xB7  Adaptive skips large image changes. On interpolates normally. Adds latency.";
 			if (setting.kind == 'i' || setting.kind == 'f') {
 				if (setting.choices.size() == 2)
 					info += "  \xC2\xB7  range " + setting.choices[0] + " to " + setting.choices[1];

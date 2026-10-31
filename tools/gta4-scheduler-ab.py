@@ -33,6 +33,19 @@ def setting(text, key):
     return match[1] if match else None
 
 
+def mfc_meter_errors(text, expected):
+    """Validate compiled experiment mode and the shared no-helper-probe policy."""
+    markers = re.findall(r"PS5 MFCMETER: gate ([01]) helper_probes ([01])", text)
+    reasons = []
+    if not markers or markers[-1] != (str(expected), "0"):
+        reasons.append(f"runtime MFC meter/helper mode does not match gate={expected}, probes=0")
+    if setting(text, "Enable Performance Report") != "false":
+        reasons.append("Performance Report must be disabled for the MFC timer experiment")
+    if "PS5 SPUHELP:" in text or "PS5 SPUHELPSTAT:" in text:
+        reasons.append("heavy SPU helper diagnostics present in MFC timer experiment")
+    return reasons
+
+
 def upload_config(ftp, wanted):
     # The console file can be owned by the title user, rather than the FTP user.
     # Preserve its permissions while temporarily allowing the transfer.
@@ -61,6 +74,8 @@ def main():
     parser.add_argument("--label", default="run1")
     parser.add_argument("--seconds", type=int, default=45)
     parser.add_argument("--expected-resolution", type=int, help="Verify active Resolution Scale percentage during capture")
+    parser.add_argument("--expected-mfc-meter-gate", type=int, choices=(0, 1),
+                        help="Verify compiled MFC timer mode, helper probes OFF and performance reporting OFF")
     parser.add_argument("--expected-tuning", action="append", default=[], metavar="KEY=VALUE",
                         help="Verify runtime PS5 TUNING line; repeat to check multiple keys")
     parser.add_argument("--host", default="192.168.0.137")
@@ -116,6 +131,8 @@ def main():
                 reasons.append("log restarted or changed during capture")
             new = after[len(before):].decode("utf-8", errors="replace")
             full = after.decode("utf-8", errors="replace")
+            if args.expected_mfc_meter_gate is not None:
+                reasons.extend(mfc_meter_errors(full, args.expected_mfc_meter_gate))
             for key, value in [("Thread Scheduler Mode", MODES[args.mode]),
                                ("SPU Block Size", "Mega"), ("Clocks scale", "100"),
                                ("SPU XFloat Accuracy", "Approximate"), ("Frame limit", "60")]:
@@ -155,6 +172,7 @@ def main():
             result = {"mode": args.mode, "scheduler": MODES[args.mode], "valid": not reasons,
                       "reasons": reasons, "windows": len(rows), "seconds": args.seconds,
                       "resolution_scale": resolution,
+                      "mfc_meter_mode": re.findall(r"PS5 MFCMETER: gate ([01]) helper_probes ([01])", full)[-1:] or None,
                       "note": "Window summaries, not pooled frame percentiles; use the same warmed scene."}
             if rows:
                 for i, key in enumerate(["fps", "p50_ms", "p95_ms", "p99_ms", "one_percent_low_fps"]):

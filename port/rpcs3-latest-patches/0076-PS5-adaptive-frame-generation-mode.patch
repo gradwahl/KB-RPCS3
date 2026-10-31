@@ -1,0 +1,132 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Sat, 31 Oct 2026 13:00:00 +0000
+Subject: [PATCH] PS5: Off, On and Adaptive frame-generation modes
+
+Preserve legacy boolean configs and pass the selected mode to the title
+presentation bridge. Adaptive image-change rejection lives in the title.
+---
+diff --git a/rpcs3/Emu/system_config_types.h b/rpcs3/Emu/system_config_types.h
+--- a/rpcs3/Emu/system_config_types.h
++++ b/rpcs3/Emu/system_config_types.h
+@@ -215,6 +215,15 @@
+ 	_16_9,
+ };
+ 
++#ifdef __PROSPERO__
++enum class ps5_frame_generation_mode
++{
++	off = 0,
++	on = 1,
++	adaptive = 2,
++};
++#endif
++
+ enum class frame_limit_type
+ {
+ 	none,
+diff --git a/rpcs3/Emu/system_config_types.cpp b/rpcs3/Emu/system_config_types.cpp
+--- a/rpcs3/Emu/system_config_types.cpp
++++ b/rpcs3/Emu/system_config_types.cpp
+@@ -323,6 +323,23 @@
+ 		return unknown;
+ 	});
+ }
++
++#ifdef __PROSPERO__
++template <>
++void fmt_class_string<ps5_frame_generation_mode>::format(std::string& out, u64 arg)
++{
++	format_enum(out, arg, [](ps5_frame_generation_mode value)
++	{
++		switch (value)
++		{
++		case ps5_frame_generation_mode::off: return "Off";
++		case ps5_frame_generation_mode::on: return "On";
++		case ps5_frame_generation_mode::adaptive: return "Adaptive";
++		}
++		return unknown;
++	});
++}
++#endif
+ 
+ template <>
+ void fmt_class_string<frame_limit_type>::format(std::string& out, u64 arg)
+diff --git a/rpcs3/Emu/system_config.h b/rpcs3/Emu/system_config.h
+--- a/rpcs3/Emu/system_config.h
++++ b/rpcs3/Emu/system_config.h
+@@ -7,6 +7,21 @@
+ enum CellSysutilLicenseArea : s32;
+ enum CellSysutilLang : s32;
+ enum CellKbMappingType : s32;
++
++#ifdef __PROSPERO__
++// Accept the original boolean YAML without changing saved user files.
++struct ps5_frame_generation_setting : cfg::_enum<ps5_frame_generation_mode>
++{
++    using base = cfg::_enum<ps5_frame_generation_mode>;
++    using base::base;
++    bool from_string(std::string_view value, bool dynamic = false) override
++    {
++        if (value == "true") value = "On";
++        else if (value == "false") value = "Off";
++        return base::from_string(value, dynamic);
++    }
++};
++#endif
+ 
+ struct cfg_root : cfg::node
+ {
+@@ -127,7 +142,7 @@
+ 		cfg::_enum<video_aspect> aspect_ratio{ this, "Aspect ratio", video_aspect::_16_9 };
+ 		cfg::_enum<frame_limit_type> frame_limit{ this, "Frame limit", frame_limit_type::_auto, true };
+ #ifdef __PROSPERO__
+-		cfg::_bool ps5_frame_generation{ this, "Frame Generation (MihawkGen)", false };
++		ps5_frame_generation_setting ps5_frame_generation{ this, "Frame Generation (MihawkGen)", ps5_frame_generation_mode::off };
+ #endif
+ 		cfg::_float<0, 1000> second_frame_limit{ this, "Second Frame Limit", 0, true }; // 0 disables its effect
+ 		cfg::_enum<msaa_level> antialiasing_level{ this, "MSAA", msaa_level::_auto };
+diff --git a/rpcs3/Emu/RSX/VK/vkutils/swapchain.cpp b/rpcs3/Emu/RSX/VK/vkutils/swapchain.cpp
+--- a/rpcs3/Emu/RSX/VK/vkutils/swapchain.cpp
++++ b/rpcs3/Emu/RSX/VK/vkutils/swapchain.cpp
+@@ -306,9 +306,9 @@
+ #ifdef __PROSPERO__
+         // History capture needs readback by GPU blit, never a CPU image download.
+         rpcs3ps5_framegen_reset(dev);
+-        m_framegen_transfer_src = g_cfg.video.ps5_frame_generation && (surface_descriptors.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
++        m_framegen_transfer_src = g_cfg.video.ps5_frame_generation.get() != ps5_frame_generation_mode::off && (surface_descriptors.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+         if (m_framegen_transfer_src) swap_info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+-        else if (g_cfg.video.ps5_frame_generation)
++        else if (g_cfg.video.ps5_frame_generation.get() != ps5_frame_generation_mode::off)
+             rsx_log.warning("PS5 FrameGen: surface lacks transfer-source usage; normal presentation");
+ #endif
+ 		swap_info.preTransform = pre_transform;
+@@ -362,14 +362,14 @@
+ 	VkResult swapchain_WSI::present(VkSemaphore semaphore, u32 image)
+ 	{
+ #ifdef __PROSPERO__
+-        if (g_cfg.video.ps5_frame_generation && m_framegen_transfer_src &&
++        if (g_cfg.video.ps5_frame_generation.get() != ps5_frame_generation_mode::off && m_framegen_transfer_src &&
+             dev.get_present_queue() == dev.get_graphics_queue())
+         {
+             VkResult result = VK_SUCCESS;
+             if (rpcs3ps5_framegen_present(dev, dev.gpu(), dev.get_present_queue(),
+                 dev.get_graphics_queue_family(), m_vk_swapchain, m_width, m_height,
+                 m_surface_format, m_framegen_images.data(), ::size32(m_framegen_images),
+-                image, semaphore, &result, vk::acquire_global_submit_lock, vk::release_global_submit_lock))
++                image, semaphore, &result, static_cast<u32>(g_cfg.video.ps5_frame_generation.get()), vk::acquire_global_submit_lock, vk::release_global_submit_lock))
+                 return result;
+         }
+ #endif
+diff --git a/rpcs3/ps5/ps5_framegen.h b/rpcs3/ps5/ps5_framegen.h
+--- a/rpcs3/ps5/ps5_framegen.h
++++ b/rpcs3/ps5/ps5_framegen.h
+@@ -12,7 +12,7 @@
+ bool rpcs3ps5_framegen_present(VkDevice device, VkPhysicalDevice gpu, VkQueue queue,
+     uint32_t family, VkSwapchainKHR swapchain, uint32_t width, uint32_t height,
+     VkFormat format, const VkImage *images, uint32_t count, uint32_t index,
+-    VkSemaphore rendered, VkResult *result, void (*lock_queue)(void), void (*unlock_queue)(void));
++    VkSemaphore rendered, VkResult *result, uint32_t mode, void (*lock_queue)(void), void (*unlock_queue)(void));
+ // Must run before destroying/replacing the swapchain or its device.
+ void rpcs3ps5_framegen_reset(VkDevice device);
+ void rpcs3ps5_framegen_set_refresh(uint32_t refresh_millihz);

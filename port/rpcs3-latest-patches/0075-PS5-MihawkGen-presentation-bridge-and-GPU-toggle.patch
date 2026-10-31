@@ -1,0 +1,163 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Sat, 31 Oct 2026 12:30:00 +0000
+Subject: [PATCH] PS5: optional MihawkGen presentation bridge and GPU toggle
+
+Keep generator code/weights in the title. Insert display frames only; do not
+change PS3 flip events, clocks or guest frame limits. Default OFF with normal
+presentation fallback and swapchain/device lifetime cleanup.
+---
+diff --git a/rpcs3/Emu/system_config.h b/rpcs3/Emu/system_config.h
+--- a/rpcs3/Emu/system_config.h
++++ b/rpcs3/Emu/system_config.h
+@@ -125,8 +125,11 @@
+ 
+ 		cfg::_enum<video_resolution> resolution{ this, "Resolution", video_resolution::_720p };
+ 		cfg::_enum<video_aspect> aspect_ratio{ this, "Aspect ratio", video_aspect::_16_9 };
+ 		cfg::_enum<frame_limit_type> frame_limit{ this, "Frame limit", frame_limit_type::_auto, true };
++#ifdef __PROSPERO__
++		cfg::_bool ps5_frame_generation{ this, "Frame Generation (MihawkGen)", false };
++#endif
+ 		cfg::_float<0, 1000> second_frame_limit{ this, "Second Frame Limit", 0, true }; // 0 disables its effect
+ 		cfg::_enum<msaa_level> antialiasing_level{ this, "MSAA", msaa_level::_auto };
+ 		cfg::_enum<shader_mode> shadermode{ this, "Shader Mode", shader_mode::async_with_interpreter };
+ 		cfg::_enum<gpu_preset_level> shader_precision{ this, "Shader Precision", gpu_preset_level::high };
+diff --git a/rpcs3/Emu/RSX/VK/vkutils/swapchain_core.h b/rpcs3/Emu/RSX/VK/vkutils/swapchain_core.h
+--- a/rpcs3/Emu/RSX/VK/vkutils/swapchain_core.h
++++ b/rpcs3/Emu/RSX/VK/vkutils/swapchain_core.h
+@@ -174,8 +174,12 @@
+ 		PFN_vkAcquireNextImageKHR _vkAcquireNextImageKHR = nullptr;
+ 		PFN_vkQueuePresentKHR _vkQueuePresentKHR = nullptr;
+ 
+ 		bool m_wm_reports_flag = false;
++#ifdef __PROSPERO__
++		bool m_framegen_transfer_src = false;
++		std::vector<VkImage> m_framegen_images;
++#endif
+ 
+ 	protected:
+ 		void init_swapchain_images(render_device& dev, u32 preferred_count = 0) override;
+ 
+diff --git a/rpcs3/Emu/RSX/VK/vkutils/swapchain.cpp b/rpcs3/Emu/RSX/VK/vkutils/swapchain.cpp
+--- a/rpcs3/Emu/RSX/VK/vkutils/swapchain.cpp
++++ b/rpcs3/Emu/RSX/VK/vkutils/swapchain.cpp
+@@ -1,7 +1,11 @@
+ #include "stdafx.h"
+ #include "swapchain.h"
+ #include "Emu/system_config.h"
++#ifdef __PROSPERO__
++#include "rpcs3/ps5/ps5_framegen.h"
++#include "Emu/RSX/VK/VKHelpers.h"
++#endif
+ 
+ namespace vk
+ {
+ 	// Swapchain image RPCS3
+@@ -137,8 +141,11 @@
+ 	void swapchain_WSI::destroy(bool)
+ 	{
+ 		if (VkDevice pdev = dev)
+ 		{
++#ifdef __PROSPERO__
++            rpcs3ps5_framegen_reset(pdev);
++#endif
+ 			if (m_vk_swapchain)
+ 			{
+ 				_vkDestroySwapchainKHR(pdev, m_vk_swapchain, nullptr);
+ 			}
+@@ -295,8 +302,16 @@
+ 		swap_info.imageFormat = m_surface_format;
+ 		swap_info.imageColorSpace = m_color_space;
+ 
+ 		swap_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++#ifdef __PROSPERO__
++        // History capture needs readback by GPU blit, never a CPU image download.
++        rpcs3ps5_framegen_reset(dev);
++        m_framegen_transfer_src = g_cfg.video.ps5_frame_generation && (surface_descriptors.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
++        if (m_framegen_transfer_src) swap_info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++        else if (g_cfg.video.ps5_frame_generation)
++            rsx_log.warning("PS5 FrameGen: surface lacks transfer-source usage; normal presentation");
++#endif
+ 		swap_info.preTransform = pre_transform;
+ 		swap_info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+ 		swap_info.imageArrayLayers = 1;
+ 		swap_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+@@ -336,13 +351,29 @@
+ 			_vkDestroySwapchainKHR(dev, old_swapchain, nullptr);
+ 		}
+ 
+ 		init_swapchain_images(dev);
++#ifdef __PROSPERO__
++        m_framegen_images.clear();
++        for (const auto& image : swapchain_images) m_framegen_images.push_back(image.value);
++#endif
+ 		return true;
+ 	}
+ 
+ 	VkResult swapchain_WSI::present(VkSemaphore semaphore, u32 image)
+ 	{
++#ifdef __PROSPERO__
++        if (g_cfg.video.ps5_frame_generation && m_framegen_transfer_src &&
++            dev.get_present_queue() == dev.get_graphics_queue())
++        {
++            VkResult result = VK_SUCCESS;
++            if (rpcs3ps5_framegen_present(dev, dev.gpu(), dev.get_present_queue(),
++                dev.get_graphics_queue_family(), m_vk_swapchain, m_width, m_height,
++                m_surface_format, m_framegen_images.data(), ::size32(m_framegen_images),
++                image, semaphore, &result, vk::acquire_global_submit_lock, vk::release_global_submit_lock))
++                return result;
++        }
++#endif
+ 		VkPresentInfoKHR present = {};
+ 		present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+ 		present.pNext = nullptr;
+ 		present.swapchainCount = 1;
+diff --git a/rpcs3/Emu/RSX/VK/vkutils/swapchain_ps5.hpp b/rpcs3/Emu/RSX/VK/vkutils/swapchain_ps5.hpp
+--- a/rpcs3/Emu/RSX/VK/vkutils/swapchain_ps5.hpp
++++ b/rpcs3/Emu/RSX/VK/vkutils/swapchain_ps5.hpp
+@@ -1,8 +1,9 @@
+ #pragma once
+ 
+ #include "swapchain_core.h"
+ #include "util/logs.hpp"
++#include "rpcs3/ps5/ps5_framegen.h"
+ 
+ #include <vector>
+ 
+ namespace vk
+@@ -114,8 +115,9 @@
+ 		VkSurfaceKHR result = VK_NULL_HANDLE;
+ 		CHECK_RESULT(vkCreateDisplayPlaneSurfaceKHR(vk_instance, &info, nullptr, &result));
+ 		rsx_log.notice("PS5: display surface %ux%u @ %u mHz, plane %u", info.imageExtent.width, info.imageExtent.height,
+ 			best.parameters.refreshRate, plane_index);
++		rpcs3ps5_framegen_set_refresh(best.parameters.refreshRate);
+ 		return result;
+ 	}
+ #endif
+ }
+diff --git a/rpcs3/ps5/ps5_framegen.h b/rpcs3/ps5/ps5_framegen.h
+new file mode 100644
+--- /dev/null
++++ b/rpcs3/ps5/ps5_framegen.h
+@@ -0,0 +1,21 @@
++// PS5 presentation bridge. SPDX-License-Identifier: MIT
++#pragma once
++#include <vulkan/vulkan.h>
++#include <stdbool.h>
++#include <stdint.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++// Called only on the presentation thread, with the same graphics/present queue.
++// false leaves the caller's image and semaphore untouched. true consumes the
++// render semaphore and returns the result of our presentation(s) in result.
++bool rpcs3ps5_framegen_present(VkDevice device, VkPhysicalDevice gpu, VkQueue queue,
++    uint32_t family, VkSwapchainKHR swapchain, uint32_t width, uint32_t height,
++    VkFormat format, const VkImage *images, uint32_t count, uint32_t index,
++    VkSemaphore rendered, VkResult *result, void (*lock_queue)(void), void (*unlock_queue)(void));
++// Must run before destroying/replacing the swapchain or its device.
++void rpcs3ps5_framegen_reset(VkDevice device);
++void rpcs3ps5_framegen_set_refresh(uint32_t refresh_millihz);
++#ifdef __cplusplus
++}
++#endif

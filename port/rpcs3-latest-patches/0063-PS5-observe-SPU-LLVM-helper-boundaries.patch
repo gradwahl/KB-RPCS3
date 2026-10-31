@@ -1,0 +1,358 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Fri, 30 Oct 2026 23:00:00 +0000
+Subject: [PATCH] PS5: observe native SPU LLVM channel and MFC helper boundaries
+
+Count ten native helper entry paths and publish live helper kind/argument/age.
+Sample the first and every 1024th outer helper completion, separating normal
+returns from nonlocal g_escape intervals closed at the gateway boundary.
+Count suppressed nested observations rather than double-count nested work.
+No per-guest-instruction probe or generated IR/control-flow change. Live
+snapshots outside these helpers are unresolved, not proof of pure guest JIT.
+Cumulative sampled sums and live ages must not be added across watchdog rows.
+This diagnostic adds overhead, to measure before attributing an FPS effect.
+
+---
+diff --git a/rpcs3/Emu/Cell/SPULLVMRecompiler.cpp b/rpcs3/Emu/Cell/SPULLVMRecompiler.cpp
+--- a/rpcs3/Emu/Cell/SPULLVMRecompiler.cpp
++++ b/rpcs3/Emu/Cell/SPULLVMRecompiler.cpp
+@@ -1,5 +1,8 @@
+ #include "stdafx.h"
+ #include "SPURecompiler.h"
++#ifdef __PROSPERO__
++#include "Emu/RSX/ps5_worker_activity.h"
++#endif
+ 
+ #include "Emu/System.h"
+ #include "Emu/system_config.h"
+@@ -4794,6 +4797,9 @@
+ 
+ 	static void exec_stop(spu_thread* _spu, u32 code)
+ 	{
++#ifdef __PROSPERO__
++		const auto ps5_helper = ps5_worker_activity::begin_helper(_spu->lv2_id, ps5_worker_activity::helper_kind::stop, code);
++#endif
+ 		if (!_spu->stop_and_signal(code) || _spu->state & cpu_flag::again)
+ 		{
+ 			spu_runtime::g_escape(_spu);
+@@ -4804,6 +4810,9 @@
+ 			_spu->pc += 4;
+ 			spu_runtime::g_escape(_spu);
+ 		}
++#ifdef __PROSPERO__
++		ps5_worker_activity::end_helper(ps5_helper);
++#endif
+ 	}
+ 
+ 	void STOP(spu_opcode_t op) //
+@@ -4843,6 +4852,9 @@
+ 
+ 	static u32 exec_rdch(spu_thread* _spu, u32 ch)
+ 	{
++#ifdef __PROSPERO__
++		const auto ps5_helper = ps5_worker_activity::begin_helper(_spu->lv2_id, ps5_worker_activity::helper_kind::rdch, ch);
++#endif
+ 		const s64 result = _spu->get_ch_value(ch);
+ 
+ 		if (result < 0 || _spu->state & cpu_flag::again)
+@@ -4851,6 +4863,9 @@
+ 		}
+ 
+ 		static_cast<void>(_spu->test_stopped());
++#ifdef __PROSPERO__
++		ps5_worker_activity::end_helper(ps5_helper);
++#endif
+ 		return static_cast<u32>(result & 0xffffffff);
+ 	}
+ 
+@@ -4862,6 +4877,9 @@
+ 
+ 	static u32 exec_read_dec(spu_thread* _spu)
+ 	{
++#ifdef __PROSPERO__
++		const auto ps5_helper = ps5_worker_activity::begin_helper(_spu->lv2_id, ps5_worker_activity::helper_kind::read_dec, 0);
++#endif
+ 		const u32 res = _spu->read_dec().first;
+ 
+ 		if (res > 1500 && g_cfg.core.spu_loop_detection)
+@@ -4871,6 +4889,9 @@
+ 			static_cast<void>(_spu->test_stopped());
+ 		}
+ 
++#ifdef __PROSPERO__
++		ps5_worker_activity::end_helper(ps5_helper);
++#endif
+ 		return res;
+ 	}
+ 
+@@ -5085,12 +5106,26 @@
+ 
+ 	static u32 exec_rchcnt(spu_thread* _spu, u32 ch)
+ 	{
+-		return _spu->get_ch_count(ch);
++#ifdef __PROSPERO__
++		const auto ps5_helper = ps5_worker_activity::begin_helper(_spu->lv2_id, ps5_worker_activity::helper_kind::rchcnt, ch);
++#endif
++		const auto ps5_result = _spu->get_ch_count(ch);
++#ifdef __PROSPERO__
++		ps5_worker_activity::end_helper(ps5_helper);
++#endif
++		return ps5_result;
+ 	}
+ 
+ 	static u32 exec_get_events(spu_thread* _spu, u32 mask)
+ 	{
+-		return _spu->get_events(mask).count;
++#ifdef __PROSPERO__
++		const auto ps5_helper = ps5_worker_activity::begin_helper(_spu->lv2_id, ps5_worker_activity::helper_kind::events, mask);
++#endif
++		const auto ps5_result = _spu->get_events(mask).count;
++#ifdef __PROSPERO__
++		ps5_worker_activity::end_helper(ps5_helper);
++#endif
++		return ps5_result;
+ 	}
+ 
+ 	llvm::Value* get_rchcnt(u32 off, u64 inv = 0)
+@@ -5105,6 +5140,9 @@
+ 	{
+ 		auto wait_on_channel = [](spu_thread* _spu, spu_channel* ch, u32 is_read) -> u32
+ 		{
++#ifdef __PROSPERO__
++			const auto ps5_helper = ps5_worker_activity::begin_helper(_spu->lv2_id, ps5_worker_activity::helper_kind::channel_wait, is_read);
++#endif
+ 			if (is_read)
+ 			{
+ 				ch->pop_wait(*_spu, false);
+@@ -5114,7 +5152,11 @@
+ 				ch->push_wait(*_spu, 0, false);
+ 			}
+ 
+-			return ch->get_count();
++			const auto ps5_result = ch->get_count();
++#ifdef __PROSPERO__
++			ps5_worker_activity::end_helper(ps5_helper);
++#endif
++			return ps5_result;
+ 		};
+ 
+ 		return m_ir->CreateXor(call("wait_on_spu_channel", +wait_on_channel, m_thread, _ptr(m_thread, off), m_ir->getInt32(inv == 0u)), m_ir->getInt32(inv));
+@@ -5313,16 +5355,25 @@
+ 
+ 	static void exec_wrch(spu_thread* _spu, u32 ch, u32 value)
+ 	{
++#ifdef __PROSPERO__
++		const auto ps5_helper = ps5_worker_activity::begin_helper(_spu->lv2_id, ps5_worker_activity::helper_kind::wrch, ch);
++#endif
+ 		if (!_spu->set_ch_value(ch, value) || _spu->state & cpu_flag::again)
+ 		{
+ 			spu_runtime::g_escape(_spu);
+ 		}
+ 
+ 		static_cast<void>(_spu->test_stopped());
++#ifdef __PROSPERO__
++		ps5_worker_activity::end_helper(ps5_helper);
++#endif
+ 	}
+ 
+ 	static void exec_list_unstall(spu_thread* _spu, u32 tag)
+ 	{
++#ifdef __PROSPERO__
++		const auto ps5_helper = ps5_worker_activity::begin_helper(_spu->lv2_id, ps5_worker_activity::helper_kind::list_unstall, tag);
++#endif
+ 		for (u32 i = 0; i < _spu->mfc_size; i++)
+ 		{
+ 			if (_spu->mfc_queue[i].tag == (tag | 0x80))
+@@ -5332,11 +5383,17 @@
+ 		}
+ 
+ 		_spu->do_mfc();
++#ifdef __PROSPERO__
++		ps5_worker_activity::end_helper(ps5_helper);
++#endif
+ 	}
+ 
+ 	template <bool Saveable>
+ 	static void exec_mfc_cmd(spu_thread* _spu)
+ 	{
++#ifdef __PROSPERO__
++		const auto ps5_helper = ps5_worker_activity::begin_helper(_spu->lv2_id, ps5_worker_activity::helper_kind::mfc_cmd, _spu->ch_mfc_cmd.cmd);
++#endif
+ 		if constexpr (!Saveable)
+ 		{
+ 			_spu->unsavable = true;
+@@ -5353,6 +5410,9 @@
+ 		{
+ 			_spu->unsavable = false;
+ 		}
++#ifdef __PROSPERO__
++		ps5_worker_activity::end_helper(ps5_helper);
++#endif
+ 	}
+ 
+ 	void WRCH(spu_opcode_t op) //
+@@ -5753,7 +5813,13 @@
+ 				{
+ 					auto exec_mfc = [](spu_thread* _this)
+ 					{
++#ifdef __PROSPERO__
++						const auto ps5_helper = ps5_worker_activity::begin_helper(_this->lv2_id, ps5_worker_activity::helper_kind::queued_mfc, 0);
++#endif
+ 						_this->do_mfc(false);
++#ifdef __PROSPERO__
++						ps5_worker_activity::end_helper(ps5_helper);
++#endif
+ 					};
+ 
+ 					const auto mfc_next = llvm::BasicBlock::Create(m_context, "MfcQueueNext", m_function);
+diff --git a/rpcs3/Emu/RSX/ps5_worker_activity.h b/rpcs3/Emu/RSX/ps5_worker_activity.h
+--- a/rpcs3/Emu/RSX/ps5_worker_activity.h
++++ b/rpcs3/Emu/RSX/ps5_worker_activity.h
+@@ -46,11 +46,26 @@
+         std::atomic<std::uint64_t> cpu_work_entries{0}, cpu_work_start{0};
+         std::atomic<std::uint64_t> cpu_work_abandoned{0};
+     };
++    enum class helper_kind : unsigned
++    {
++        rdch, wrch, mfc_cmd, channel_wait, rchcnt, events,
++        read_dec, list_unstall, stop, queued_mfc, count
++    };
++    constexpr unsigned helper_count = static_cast<unsigned>(helper_kind::count);
++    struct helper_counters
++    {
++        std::atomic<std::uint64_t> entries{0}, returns{0}, escapes{0};
++        counters normal_samples, escaped_samples;
++    };
+     struct alignas(64) worker_slot
+     {
+         std::atomic<std::uint32_t> id{0};
+         counters stats[2];
+         coverage_counters coverage;
++        helper_counters helpers[helper_count];
++        std::atomic<std::uint64_t> helper_start{0}, nested_helpers{0};
++        std::atomic<unsigned> helper_current{0}, helper_arg{0};
++        std::atomic<bool> helper_sampled{false};
+     };
+     inline worker_slot spu[64]{};
+     inline counters rsx[stage_count]{};
+@@ -107,9 +122,85 @@
+         return start;
+     }
+ 
++    // No destructor cleanup: g_escape can bypass native C++ frames.
++    // Only outer measured helpers are timed; any nesting is explicitly counted.
++    struct helper_probe
++    {
++        worker_slot* slot = nullptr;
++        helper_kind kind{};
++        std::uint64_t start = 0;
++        bool sampled = false;
++    };
++    inline helper_probe begin_helper(std::uint32_t id, helper_kind kind, unsigned arg) noexcept
++    {
++        if (!id || static_cast<unsigned>(kind) >= helper_count) return {};
++        static thread_local worker_slot* cached = nullptr;
++        if (!cached || cached->id.load(std::memory_order_relaxed) != id)
++            cached = register_spu(id);
++        if (!cached) return {};
++        if (cached->helper_start.load(std::memory_order_relaxed))
++        {
++            cached->nested_helpers.fetch_add(1, std::memory_order_relaxed);
++            return {};
++        }
++        const auto visit = cached->helpers[static_cast<unsigned>(kind)].entries.fetch_add(1, std::memory_order_relaxed);
++        const bool sampled = (visit & 1023u) == 0;
++        const auto start = utils::get_tsc();
++        cached->helper_current.store(static_cast<unsigned>(kind), std::memory_order_relaxed);
++        cached->helper_arg.store(arg, std::memory_order_relaxed);
++        cached->helper_sampled.store(sampled, std::memory_order_relaxed);
++        cached->helper_start.store(start, std::memory_order_release);
++        return {cached, kind, start, sampled};
++    }
++    inline void end_helper(helper_probe probe) noexcept
++    {
++        if (!probe.slot) return;
++        auto& stats = probe.slot->helpers[static_cast<unsigned>(probe.kind)];
++        probe.slot->helper_start.store(0, std::memory_order_release);
++        stats.returns.fetch_add(1, std::memory_order_relaxed);
++        if (probe.sampled)
++        {
++            const auto end = utils::get_tsc();
++            if (end >= probe.start) stats.normal_samples.record(end - probe.start);
++        }
++    }
++    inline void escape_helper(worker_slot* slot) noexcept
++    {
++        const auto start = slot->helper_start.exchange(0, std::memory_order_acq_rel);
++        if (!start) return;
++        const auto kind = slot->helper_current.load(std::memory_order_relaxed);
++        if (kind >= helper_count) return;
++        auto& stats = slot->helpers[kind];
++        stats.escapes.fetch_add(1, std::memory_order_relaxed);
++        if (slot->helper_sampled.load(std::memory_order_relaxed))
++        {
++            const auto end = utils::get_tsc();
++            if (end >= start) stats.escaped_samples.record(end - start);
++        }
++    }
++    struct helper_snapshot
++    {
++        bool active = false, stable = true;
++        unsigned kind = 0, arg = 0;
++        std::uint64_t age_tsc = 0, nested = 0;
++    };
++    inline helper_snapshot observe_helper(const worker_slot& slot) noexcept
++    {
++        const auto start = slot.helper_start.load(std::memory_order_acquire);
++        const auto kind = slot.helper_current.load(std::memory_order_relaxed);
++        const auto arg = slot.helper_arg.load(std::memory_order_relaxed);
++        const auto again = slot.helper_start.load(std::memory_order_acquire);
++        const auto now = utils::get_tsc();
++        const bool stable = start == again && (!start || kind < helper_count);
++        return {stable && start != 0, stable, kind, arg,
++            stable && start && now >= start ? now - start : 0,
++            slot.nested_helpers.load(std::memory_order_relaxed)};
++    }
++
+     inline void end_gateway(worker_slot* slot, std::uint64_t start) noexcept
+     {
+         if (!slot) return;
++        escape_helper(slot);
+         record(slot, stage::spu_gateway, start);
+         // g_escape restores the native stack without C++ unwinding. A
+         // sampled cpu_work may have been bypassed: never leave it active
+diff --git a/rpcs3/ps5/ps5_frontend.cpp b/rpcs3/ps5/ps5_frontend.cpp
+--- a/rpcs3/ps5/ps5_frontend.cpp
++++ b/rpcs3/ps5/ps5_frontend.cpp
+@@ -1059,6 +1059,31 @@
+                                 static_cast<unsigned long long>(coverage.cpu_work_entries),
+                                 static_cast<unsigned long long>(coverage.cpu_work_sample_active), work_age_us,
+                                 static_cast<unsigned long long>(coverage.cpu_work_abandoned));
++                            const auto helper = ps5_worker_activity::observe_helper(slot);
++                            const double helper_age_us = clock_hz ? 1'000'000.0 * helper.age_tsc / clock_hz : 0;
++                            sys_log.notice("PS5 SPUHELP: v1 id 0x%x active %u stable %u kind %u arg %u age_us %.3f nested %llu",
++                                id, static_cast<unsigned>(helper.active), static_cast<unsigned>(helper.stable),
++                                helper.kind, helper.arg, helper_age_us, static_cast<unsigned long long>(helper.nested));
++                            for (unsigned kind = 0; kind < ps5_worker_activity::helper_count; ++kind)
++                            {
++                                auto& stats = slot.helpers[kind];
++                                const auto entries = stats.entries.load(std::memory_order_relaxed);
++                                if (!entries) continue;
++                                const auto normal_n = stats.normal_samples.sampled.load(std::memory_order_relaxed);
++                                const auto escape_n = stats.escaped_samples.sampled.load(std::memory_order_relaxed);
++                                const auto to_us = [clock_hz](u64 tsc) { return clock_hz ? 1'000'000.0 * tsc / clock_hz : 0; };
++                                // Cumulative sampled sums: do not add watchdog rows.
++                                sys_log.notice("PS5 SPUHELPSTAT: v1 id 0x%x kind %u entries %llu returns %llu escapes %llu normal_n %llu normal_sum_us %.3f normal_max_us %.3f escape_n %llu escape_sum_us %.3f escape_max_us %.3f",
++                                    id, kind, static_cast<unsigned long long>(entries),
++                                    static_cast<unsigned long long>(stats.returns.load(std::memory_order_relaxed)),
++                                    static_cast<unsigned long long>(stats.escapes.load(std::memory_order_relaxed)),
++                                    static_cast<unsigned long long>(normal_n),
++                                    to_us(stats.normal_samples.total_tsc.load(std::memory_order_relaxed)),
++                                    to_us(stats.normal_samples.max_tsc.load(std::memory_order_relaxed)),
++                                    static_cast<unsigned long long>(escape_n),
++                                    to_us(stats.escaped_samples.total_tsc.load(std::memory_order_relaxed)),
++                                    to_us(stats.escaped_samples.max_tsc.load(std::memory_order_relaxed)));
++                            }
+                             emit("spu", id, stage::spu_gateway, slot.stats[0]);
+                             emit("spu", id, stage::spu_cpu_work, slot.stats[1]);
+                         }

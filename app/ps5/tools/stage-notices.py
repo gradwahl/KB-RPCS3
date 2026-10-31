@@ -151,6 +151,20 @@ def main():
             source=dict(kind="git", path=str(kit), remote="https://github.com/mihawk-99/PS5_VKHomebrewUI", revision=kit_rev,
                         dirty=False)))
 
+    # MihawkGen sources and trained weights are vendored in this title snapshot.
+    if (ROOT / "framegen/UPSTREAM.json").exists():
+        fg = ROOT / "framegen"
+        (out / "mihawkgen").mkdir()
+        for name in ("LICENSE.md", "THIRD_PARTY_NOTICES.txt", "UPSTREAM.json"):
+            write_text(out / "mihawkgen" / name, ROOT, rev, "framegen/" + name)
+        upstream = json.loads((fg / "UPSTREAM.json").read_text())
+        parts.append(dict(
+            id="mihawkgen", name="MihawkGen colour-frame neural interpolation and embedded trained weights",
+            licence="GPL-3.0-or-later", copyright=["Copyright (C) 2026 Mihawk"],
+            artifacts=["eboot.bin"], texts="licenses/mihawkgen/",
+            source=dict(kind="git", path=str(ROOT), remote=remote, revision=rev, dirty=dirty,
+                        upstream=upstream)))
+
     # The payload SDK fork: its platform layer and headers
     sdk = Path(ROOT.parent / "PS5_PayloadSDK")
     sdk_rev = pinned("tools/setup-sdk.sh", "sdk_revision")

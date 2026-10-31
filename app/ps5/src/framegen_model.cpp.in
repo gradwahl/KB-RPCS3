@@ -1,0 +1,10 @@
+// Embed the upstream weights so paired executable deployment is self-contained.
+// SPDX-License-Identifier: MIT
+asm(".section .rodata\n"
+    ".balign 16\n"
+    ".global rpcs3ps5_fg_model_start\n"
+    "rpcs3ps5_fg_model_start:\n"
+    ".incbin \"@ROOT@/framegen/models/network.fgw\"\n"
+    ".global rpcs3ps5_fg_model_end\n"
+    "rpcs3ps5_fg_model_end:\n"
+    ".previous\n");

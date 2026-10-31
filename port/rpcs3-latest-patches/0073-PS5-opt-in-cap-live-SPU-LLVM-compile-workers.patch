@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB <kb@kb-rpcs3.example>
+Date: Sat, 31 Oct 2026 04:32:45 +0000
+Subject: [PATCH] PS5: optional limit for live SPU LLVM JIT workers only
+
+Keep PPU LLVM, shader and SPU boot-cache compilation unchanged.
+Normal runtime worker calculation unchanged with default cap=0.
+Diagnostic cap allows direct warm-gameplay 4 vs 2 comparison
+without changing cache keys or guest semantics. This is not
+automatic throttling and must remain off until real A/B/A gates.
+---
+diff --git a/rpcs3/Emu/Cell/SPUCommonRecompiler.cpp b/rpcs3/Emu/Cell/SPUCommonRecompiler.cpp
+--- a/rpcs3/Emu/Cell/SPUCommonRecompiler.cpp
++++ b/rpcs3/Emu/Cell/SPUCommonRecompiler.cpp
+@@ -19,8 +19,11 @@
+ #include "SPUThread.h"
+ #include "SPUAnalyser.h"
+ #include "SPUInterpreter.h"
+ #include "SPUDisAsm.h"
++#ifdef __PROSPERO__
++#include "ps5_spu_live_compile_workers.h"
++#endif
+ #include <algorithm>
+ #include <cstring>
+ #include <optional>
+ #include <unordered_set>
+@@ -9223,8 +9226,19 @@
+ 		{
+ 			worker_count = 2;
+ 		}
+ 
++#if defined(__PROSPERO__) && PS5_SPU_LIVE_JIT_WORKER_CAP
++		// This is the *live* SPUW. worker pool only. Don't conflate it
++		// with the boot-time SPU Worker precompiler or PPU LLVM threads.
++		// Preserve at least one worker, preventing queue stranding.
++		const u32 original_worker_count = worker_count;
++		worker_count = ps5_spu_live_workers::limit(worker_count);
++		spu_log.notice("PS5 SPU LIVE JIT: workers %u (normal %u, diagnostic cap %u)",
++			worker_count, original_worker_count,
++			static_cast<unsigned>(PS5_SPU_LIVE_JIT_WORKER_CAP));
++#endif
++
+ 		u32 worker_index = 0;
+ 		u32 notify_compile_count = 0;
+ 		u32 compile_pending = 0;
+ 		std::vector<u8> notify_compile(worker_count);
+diff --git a/rpcs3/Emu/Cell/ps5_spu_live_compile_workers.h b/rpcs3/Emu/Cell/ps5_spu_live_compile_workers.h
+new file mode 100644
+--- /dev/null
++++ b/rpcs3/Emu/Cell/ps5_spu_live_compile_workers.h
+@@ -0,0 +1,27 @@
++#pragma once
++// Section 4: isolated opt-in live SPU LLVM compilation contention A/B.
++// 0 = unmodified runtime worker count, normal shipping default.
++// 1..32 = cap ONLY the SPUW. runtime-recompiler worker pool.
++// Initial SPU cache precompilation, PPU compilation, cache names and
++// cache contents remain unchanged. A lower limit may delay live JIT!
++// Do not enable by default without independent warm/cold frame-time
++// and CPU-occupancy tests.  This cap is NOT an adaptive scheduler.
++#ifndef PS5_SPU_LIVE_JIT_WORKER_CAP
++#define PS5_SPU_LIVE_JIT_WORKER_CAP 0
++#endif
++#if PS5_SPU_LIVE_JIT_WORKER_CAP < 0 || PS5_SPU_LIVE_JIT_WORKER_CAP > 32
++#error PS5_SPU_LIVE_JIT_WORKER_CAP must be in range 0..32
++#endif
++
++namespace ps5_spu_live_workers
++{
++    constexpr unsigned limit(unsigned normal)
++    {
++#if PS5_SPU_LIVE_JIT_WORKER_CAP
++        return normal < PS5_SPU_LIVE_JIT_WORKER_CAP ?
++            normal : PS5_SPU_LIVE_JIT_WORKER_CAP;
++#else
++        return normal;
++#endif
++    }
++}

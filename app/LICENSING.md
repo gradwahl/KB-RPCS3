@@ -7,6 +7,7 @@ glue. It started as Mihawk's **PS5 Vulkan Template**. Each file's header is auth
 |---|---|---|
 | `base/`, `shaders/`, template files with an MIT header (`ps5/src/platform*.c`, `launcher.cpp`, …) and template files without a header (`ps5/src/main.cpp`, `samples.cpp`, `ps5/tools/*`) | Sascha Willems; Mihawk | MIT (`LICENSE.md`; the template README states the foundation is MIT) |
 | `external/*`, `ps5/third_party/volk` | their authors | as in each folder's licence file |
+| `framegen/`, `ps5/src/ps5_framegen.cpp` | Mihawk; KB integration | GPL-3.0-or-later; upstream revision and weight hash in `framegen/UPSTREAM.json` |
 | `ps5/ui/*`, `examples/rpcs3ps5/rpcs3ps5.cpp` | Mihawk (with KB's changes) | GPL-3.0-or-later |
 | `examples/rpcs3ps5/kit/*` except `ps5_frontend.h`; `ps5/src/ps5_env.c`, `ps5_dl.c`, `ps5_fastclock.c`, `ps5_tuning.c`, `import_check.c`, `probe_rpcs3.cpp` | KB | GPL-3.0-or-later |
 | `examples/rpcs3ps5/kit/ps5_frontend.h` (the interface to the patched RPCS3 core) | KB | GPL-2.0-only (see `../LICENSING_STATUS.md` §5) |
