@@ -1,0 +1,14 @@
+PS5_PAYLOAD_SDK ?= /opt/ps5-payload-sdk
+
+include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
+
+ELF := ps5_fw_probe.elf
+CFLAGS := -Wall -Wextra -Werror -O2
+
+all: $(ELF)
+
+$(ELF): ps5_fw_probe.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+clean:
+	rm -f $(ELF)

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.elf
+*.ucp
+*.iso
+*.dat
+*.log
+*.png
+*.PNG
+*.json
