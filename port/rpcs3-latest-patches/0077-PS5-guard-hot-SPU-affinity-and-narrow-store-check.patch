@@ -1,0 +1,255 @@
+From a27ada950aa43799407993b59ba720246d390bb6 Mon Sep 17 00:00:00 2001
+From: KB-RPCS3 <dev@example.invalid>
+Date: Sun, 1 Nov 2026 17:11:08 +0000
+Subject: [PATCH] PS5: validate isolated hot SPU affinity and repair checked
+ narrow stores
+
+---
+ Utilities/Thread.cpp                 | 107 +++++++++++++++++++++------
+ rpcs3/Emu/Cell/SPULLVMRecompiler.cpp |   5 ++
+ rpcs3/ps5/ps5_frontend.cpp           |  39 +++++++++-
+ 3 files changed, 127 insertions(+), 24 deletions(-)
+
+diff --git a/Utilities/Thread.cpp b/Utilities/Thread.cpp
+index e66d2f1..3d75f60 100644
+--- a/Utilities/Thread.cpp
++++ b/Utilities/Thread.cpp
+@@ -4107,33 +4107,66 @@ namespace
+ 	// What the last applied pass pinned / how many threads it saw (g_ps5_threads_mutex)
+ 	pthread_t g_ps5_hot_applied_pinned{};
+ 	usz g_ps5_hot_applied_count = 0;
++	s64 g_ps5_hot_applied_cpu = -1;
++	std::atomic<u64> g_ps5_verified_isolated{0};
+ }
+ 
+-static void ps5_apply_mask(pthread_t thread, u64 mask)
++// Published by the watchdog only after a complete, independently checked CPU topology probe.
++extern "C" void ps5_hotcpu_verified_cores(u64 mask)
+ {
+-	cpu_set_t cs;
+-	CPU_ZERO(&cs);
+-	for (u32 c = 0; c < 64u; c++)
+-	{
+-		const u64 shifted = mask >> c;
+-		if (shifted & 1)
+-		{
++	g_ps5_verified_isolated.store(mask, std::memory_order_release);
++}
++
++// A requested affinity is not an applied affinity until the kernel reads it back.
++static bool ps5_apply_mask(pthread_t thread, u64 mask)
++{
++    if (!mask)
++    {
++        sig_log.warning("PS5 HOTCPU: refused empty affinity mask");
++        return false;
++    }
++    cpu_set_t requested, previous, actual;
++    CPU_ZERO(&requested);
++    CPU_ZERO(&previous);
++    CPU_ZERO(&actual);
++    const int old_rc = ::pthread_getaffinity_np(thread, sizeof(previous), &previous);
++    if (old_rc)
++    {
++        sig_log.warning("PS5 HOTCPU: could not read original affinity: %d", old_rc);
++        return false;
++    }
++    for (u32 c = 0; c < 64u; ++c)
++    {
++        if (mask >> c & 1)
++        {
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wold-style-cast"
+-			CPU_SET(c, &cs);
++            CPU_SET(c, &requested);
+ #pragma GCC diagnostic pop
+-		}
+-		if (shifted <= 1)
+-			break;
+-	}
+-	::pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cs);
++        }
++    }
++    const int set_rc = ::pthread_setaffinity_np(thread, sizeof(requested), &requested);
++    const int get_rc = set_rc ? -1 : ::pthread_getaffinity_np(thread, sizeof(actual), &actual);
++    bool match = !set_rc && !get_rc;
++    for (u32 c = 0; match && c < CPU_SETSIZE; ++c)
++        match = !!CPU_ISSET(c, &requested) == !!CPU_ISSET(c, &actual);
++    if (!match)
++    {
++        const int restore_rc = ::pthread_setaffinity_np(thread, sizeof(previous), &previous);
++        sig_log.warning("PS5 HOTCPU: pin failed set=%d get=%d restore=%d mask=0x%llx",
++            set_rc, get_rc, restore_rc, static_cast<unsigned long long>(mask));
++    }
++    return match;
+ }
+ 
+ extern "C" void ps5_hot_spu_rebalance(s64 cpu)
+ {
+ 	const u64 pmask = thread_ctrl::get_process_affinity_mask();
+ 
+-	if (cpu < 0 || cpu >= 64 || !(pmask >> cpu & 1) || g_cfg.core.thread_scheduler == thread_scheduler_mode::os)
++	const u64 singleton_cores = g_ps5_verified_isolated.load(std::memory_order_acquire);
++	if (cpu < 0 || cpu >= 64 || !(pmask >> cpu & 1) ||
++		!(singleton_cores >> (cpu >= 0 && cpu < 64 ? cpu : 0) & 1) ||
++		g_cfg.core.thread_scheduler == thread_scheduler_mode::os)
+ 	{
+ 		if (g_ps5_hot_active)
+ 		{
+@@ -4143,7 +4176,8 @@ extern "C" void ps5_hot_spu_rebalance(s64 cpu)
+ 			g_ps5_hot_active = false;
+ 			g_ps5_hot_applied_pinned = {};
+ 			g_ps5_hot_applied_count = 0;
+-			sig_log.notice("PS5 HOTCPU: off, masks restored");
++			g_ps5_hot_applied_cpu = -1;
++			sig_log.notice("PS5 HOTCPU: off, normal masks requested");
+ 		}
+ 		return;
+ 	}
+@@ -4188,6 +4222,7 @@ extern "C" void ps5_hot_spu_rebalance(s64 cpu)
+ 			g_ps5_hot_cand_name.clear();
+ 			g_ps5_hot_applied_pinned = {};
+ 			g_ps5_hot_applied_count = 0;
++			g_ps5_hot_applied_cpu = -1;
+ 			return;
+ 		}
+ 		if (best && best->name != g_ps5_hot_pinned_name && best->pct >= 85 && best->pct >= pinned_pct + 10)
+@@ -4222,21 +4257,47 @@ extern "C" void ps5_hot_spu_rebalance(s64 cpu)
+ 
+ 	// Re-apply only when the pinned thread or the registered thread count changed; otherwise the masks are
+ 	// already in force and re-applying every 4 s only fights the OS.
+-	if (g_ps5_hot_applied_pinned == g_ps5_hot_pinned && g_ps5_hot_applied_count == rows.size())
++	if (g_ps5_hot_applied_pinned == g_ps5_hot_pinned &&
++		g_ps5_hot_applied_count == rows.size() && g_ps5_hot_applied_cpu == cpu)
+ 		return;
+ 
++	// Check all masks before changing a single worker. Never strand a worker.
+ 	for (const auto& r : rows)
+ 	{
+ 		const u64 normal = ps5_affinity_mask(r.cls, pmask);
+-		if (r.t == g_ps5_hot_pinned)
+-			ps5_apply_mask(r.t, 1ull << cpu);
+-		else if (normal >> cpu & 1)
+-			ps5_apply_mask(r.t, normal & ~(1ull << cpu));
+-		else
+-			ps5_apply_mask(r.t, normal);
++		if (r.t != g_ps5_hot_pinned && !(normal & ~(1ull << cpu)))
++		{
++			sig_log.warning("PS5 HOTCPU: refusing empty worker mask for %s", r.name);
++			return;
++		}
++	}
++	bool applied = true;
++	for (const auto& r : rows)
++	{
++		const u64 normal = ps5_affinity_mask(r.cls, pmask);
++		const u64 desired = r.t == g_ps5_hot_pinned ? (1ull << cpu) : (normal & ~(1ull << cpu));
++		if (!ps5_apply_mask(r.t, desired))
++		{
++			applied = false;
++			break;
++		}
++	}
++	if (!applied)
++	{
++		for (const auto& r : rows)
++			ps5_apply_mask(r.t, ps5_affinity_mask(r.cls, pmask));
++		g_ps5_hot_active = false;
++		g_ps5_hot_applied_pinned = {};
++		g_ps5_hot_applied_count = 0;
++		g_ps5_hot_applied_cpu = -1;
++		sig_log.warning("PS5 HOTCPU: kernel refused affinity; normal masks requested");
++		return;
+ 	}
+ 	g_ps5_hot_applied_pinned = g_ps5_hot_pinned;
+ 	g_ps5_hot_applied_count = rows.size();
++	g_ps5_hot_applied_cpu = cpu;
++	sig_log.notice("PS5 HOTCPU: verified affinity for %s on CPU %lld",
++		g_ps5_hot_pinned_name, static_cast<long long>(cpu));
+ }
+ #endif
+ 
+diff --git a/rpcs3/Emu/Cell/SPULLVMRecompiler.cpp b/rpcs3/Emu/Cell/SPULLVMRecompiler.cpp
+index 5130372..01a53c0 100644
+--- a/rpcs3/Emu/Cell/SPULLVMRecompiler.cpp
++++ b/rpcs3/Emu/Cell/SPULLVMRecompiler.cpp
+@@ -9920,6 +9920,11 @@ public:
+ 		m_ir->CreateCondBr(ok, cont, bad, m_md_unlikely);
+ 		m_ir->SetInsertPoint(bad);
+ 		call("ps5_narrow_ls_check", &rpcs3ps5_narrow_ls_check_fail, m_ir->getInt64(m_hash_start), m_ir->getInt32(m_pos));
++		// Repair the whole quad on a failed narrow-store equivalence check.
++		// The old diagnostic left wrong local-store bytes visible to the guest.
++		value_t<u8[16]> expected;
++		expected.value = full;
++		spu_mem_attr(m_ir->CreateStore(byteswap(expected).eval(m_ir), _ptr(m_lsptr, addr)));
+ 		m_ir->CreateBr(cont);
+ 		m_ir->SetInsertPoint(cont);
+ 	}
+diff --git a/rpcs3/ps5/ps5_frontend.cpp b/rpcs3/ps5/ps5_frontend.cpp
+index 8725c1e..29ce269 100644
+--- a/rpcs3/ps5/ps5_frontend.cpp
++++ b/rpcs3/ps5/ps5_frontend.cpp
+@@ -413,6 +413,7 @@ void rpcs3ps5_tune_refresh(void);
+ const char* rpcs3ps5_tune_describe(void);
+ void ps5_vk_event_stats(uint64_t* waits, uint64_t* spin_tsc, uint64_t* sleeps);
+ void ps5_hot_spu_rebalance(int64_t cpu); // Utilities/Thread.cpp (combo §3)
++void ps5_hotcpu_verified_cores(uint64_t mask); // Utilities/Thread.cpp
+ uint64_t rpcs3ps5_jit_verify_failures(void); // SPULLVMRecompiler.cpp (combo §6.1)
+ uint64_t rpcs3ps5_narrow_ls_check_failures(void); // SPULLVMRecompiler.cpp (combo narrow-store check)
+ extern uint64_t radv_ps5_stat_waits __attribute__((weak));
+@@ -950,8 +951,10 @@ void start_watchdog()
+ #if PS5_CPU_TOPOLOGY_PROBE
+         // Opt-in, one-time diagnostic only. Pin and read back the
+         // WATCHDOG thread, not guest execution, rendering or audio.
+-        const auto topo = ps5_cpu_topology::probe([](const ps5_cpu_topology::sample& s)
++        std::vector<ps5_cpu_topology::sample> core_samples;
++        const auto topo = ps5_cpu_topology::probe([&](const ps5_cpu_topology::sample& s)
+         {
++            core_samples.push_back(s);
+             sys_log.notice("PS5 TOPO CPU: index %u set_rc %d get_rc %d mask 0x%llx x2apic %u core %u node %u tpc %u valid %u",
+                 s.cpu, s.set_rc, s.get_rc,
+                 static_cast<unsigned long long>(s.observed_mask),
+@@ -963,6 +966,40 @@ void start_watchdog()
+             static_cast<unsigned>(topo.has_amd_core_leaf),
+             topo.initial_read_rc, topo.restore_rc, topo.attempts,
+             topo.succeeded, static_cast<unsigned>(topo.truncated_cpu_set));
++        // Fail closed unless all permitted logical CPUs were independently pinned
++        // and read back; verify APIC uniqueness and identify actual singleton cores.
++        bool complete = !topo.initial_read_rc && !topo.restore_rc &&
++            topo.has_amd_core_leaf && !topo.truncated_cpu_set &&
++            topo.attempts != 0 && topo.succeeded == topo.attempts &&
++            core_samples.size() == topo.attempts &&
++            topo.attempts == static_cast<unsigned>(__builtin_popcountll(topo.original_mask));
++        for (std::size_t i = 0; complete && i < core_samples.size(); ++i)
++        {
++            const auto& a = core_samples[i];
++            if (a.set_rc || a.get_rc || !a.cpuid_valid ||
++                a.observed_mask != (1ull << a.cpu))
++                complete = false;
++            for (std::size_t j = 0; complete && j < i; ++j)
++                if (core_samples[j].apic_id == a.apic_id)
++                    complete = false;
++        }
++        uint64_t isolated = 0;
++        if (complete)
++        {
++            for (const auto& a : core_samples)
++            {
++                unsigned same_core = 0;
++                for (const auto& b : core_samples)
++                    if (a.core_id == b.core_id && a.node_id == b.node_id)
++                        ++same_core;
++                if (same_core == 1)
++                    isolated |= (1ull << a.cpu);
++            }
++        }
++        ps5_hotcpu_verified_cores(isolated);
++        sys_log.notice("PS5 HOTCPU TOPO: complete=%u verified_singleton_mask=0x%llx",
++            static_cast<unsigned>(complete), static_cast<unsigned long long>(isolated));
++
+ #endif
+ 		u64 last_dump = 0;
+ 		u64 last_cpu = now_ms();
+-- 
+2.43.0
+
