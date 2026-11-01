@@ -10,6 +10,7 @@ import hashlib,json,subprocess,tempfile,textwrap
 
 ROOT=Path(__file__).resolve().parents[2]
 PATCH=ROOT/"port/rpcs3-latest-patches/0074-PS5-default-off-production-CPU-profiling.patch"
+PATCH_NEXT=ROOT/"port/rpcs3-latest-patches/0077-PS5-guard-hot-SPU-affinity-and-narrow-store-check.patch"
 ORIGINAL=Path.home()/"work/cpu-plan-release-profile0074-original-20261031"
 SOURCE=Path.home()/"work/rpcs3-latest"
 
@@ -77,7 +78,12 @@ def main(source=SOURCE,original=ORIGINAL):
     files=m["files"]
     assert len(files)==8 and PATCH.read_text().count("diff --git ")==8
     before=m["before"];after=m["after"]
-    assert all(hashlib.sha256((source/p).read_bytes()).hexdigest()==h for p,h in after.items())
+    # Historical patch74 invariants are still exact. Patch77 adds verified
+    # affinity and a mismatch repair to three of those files, so undo only
+    # that known follow-up in the *temporary* replay tree before hashing.
+    newer=PATCH_NEXT.is_file() and "g_ps5_verified_isolated" in (source/"Utilities/Thread.cpp").read_text()
+    if not newer:
+        assert all(hashlib.sha256((source/p).read_bytes()).hexdigest()==h for p,h in after.items())
     frontend=(source/"rpcs3/ps5/ps5_frontend.cpp").read_text()
     util=(source/"Utilities/Thread.cpp").read_text()
     jit=(source/"rpcs3/Emu/Cell/SPULLVMRecompiler.cpp").read_text()
@@ -95,6 +101,10 @@ def main(source=SOURCE,original=ORIGINAL):
         run("git","init","-q",str(t))
         for p in files:
             d=t/p;d.parent.mkdir(parents=True,exist_ok=True);d.write_bytes((source/p).read_bytes())
+        if newer:
+            run("git","apply","--reverse","--check",PATCH_NEXT,cwd=t)
+            run("git","apply","--reverse",PATCH_NEXT,cwd=t)
+        assert all(hashlib.sha256((t/p).read_bytes()).hexdigest()==h for p,h in after.items())
         run("git","apply","--reverse","--check",PATCH,cwd=t)
         run("git","apply","--reverse",PATCH,cwd=t)
         assert not (t/files[-1]).exists()
@@ -106,6 +116,12 @@ def main(source=SOURCE,original=ORIGINAL):
         for p,h in after.items():
             assert hashlib.sha256((t/p).read_bytes()).hexdigest()==h
         print("PASS patch0074 exact forward/reverse replay and previous dirty sources preserved")
+        if newer:
+            run("git","apply","--check",PATCH_NEXT,cwd=t)
+            run("git","apply",PATCH_NEXT,cwd=t)
+            for rel in ("Utilities/Thread.cpp","rpcs3/ps5/ps5_frontend.cpp","rpcs3/Emu/Cell/SPULLVMRecompiler.cpp"):
+                assert (t/rel).read_bytes()==(source/rel).read_bytes()
+            print("PASS patch0077 exact follow-up replay from patch74")
         # Shadow only TSC hardware support, not the diagnostic source headers.
         (t/"util").mkdir()
         (t/"util/tsc.hpp").write_text(
